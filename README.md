@@ -9,7 +9,7 @@
 | Phase | 內容 | 狀態 |
 |---|---|---|
 | 0 | 專案骨架、SQLite schema、LLM client（結構化輸出、成本計量、FakeLLM、錄製重播） | 完成（Haiku 與 Opus 角色皆已真實驗證） |
-| 1 | SimWeb 研究環境 | 未開始 |
+| 1 | SimWeb 研究環境（6 個情境、反爬行為、陷阱、注入頁、模擬排名與歷史、自動推導標準答案） | 完成 |
 | 2–6 | 研究迴圈、假設證據、學習、自治邊界、評測 | 未開始 |
 
 ## 安裝
@@ -29,6 +29,9 @@ seo-intel config show      # 目前生效的模型、價格、預算、自治邊
 seo-intel db init          # 建立 data/intel.db
 seo-intel db info          # 資料表與筆數
 seo-intel llm ping         # 一次真實 API 呼叫，顯示 token 與成本
+seo-intel simweb list                    # 列出研究情境
+seo-intel simweb inspect --scenario s1   # 情境細節、標準答案、植入效應可觀察性
+seo-intel simweb fetch -s s1 <網址>      # 在模擬世界中抓取一個網址
 ```
 
 ## 測試
@@ -59,6 +62,8 @@ src/seo_intel/
   store/           SQLite schema 與存取層
   llm/             Anthropic client、成本計量、FakeLLM、錄製重播
   cli.py           seo-intel 指令
+src/simweb/        研究環境（獨立套件）：世界產生器、反爬行為、模擬排名與歷史 API
+evals/scenarios/   6 個研究情境（4 訓練 / 2 測試）
 tests/             單元測試
 docs/              設計文件
 ```

@@ -147,8 +147,9 @@ D:\code\seo\
 │   ├── observe/           # console（即時輸出）, trace, timeline（HTML）
 │   ├── store/             # schema.sql, db.py
 │   └── cli.py
-├── simweb/                # 世界產生器、情境、反爬行為、模擬 API、MockTransport
-├── evals/                 # scenarios/, scorer.py, runner.py, reports/
+├── src/simweb/            # 研究環境（獨立套件，不依賴 seo_intel）：世界產生器、反爬行為、
+│                          # 模擬排名與歷史 API、MockTransport、由事件推導標準答案
+├── evals/                 # scenarios/*.yaml（6 個情境）, scorer.py, runner.py, reports/
 ├── tests/
 ├── data/  runs/           # .gitignore
 └── docs/

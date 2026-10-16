@@ -1,0 +1,63 @@
+# s5（測試）電商站：排名下滑原因
+# 真相：summitgear.sim 把帳篷分類頁改成長篇選購導言（字數 ×6、新增章節、FAQ 與 FAQPage schema）
+# 干擾項：wildcart.sim 同期大量上架帳篷商品；混淆因子：9 月初自家站全站性小幅下滑
+id: s5
+split: test
+archetype: ecommerce
+seed: 505
+now: 2026-10-01
+goal:
+  type: ranking_drop_cause
+  question: 為什麼自家站在「tents」主題的排名自 8 月起下滑？
+  own_site: own-camp.sim
+  competitors: [summitgear.sim, wildcart.sim]
+  cluster: tents
+  window: [2026-07-01, 2026-10-01]
+sites:
+  - domain: own-camp.sim
+    role: own
+    archetype: ecommerce
+    counts: {product: 1200, blog: 300, tag: 400, review: 400}
+  - domain: summitgear.sim
+    role: competitor
+    archetype: ecommerce
+    counts: {product: 10000, blog: 2500, tag: 6000, review: 2000, brand: 300}
+    waf_prefixes: [/reviews/]
+    flaky_rate: 0.04
+    malformed_rate: 0.01
+    injection: {template: category, cluster: tents}
+  - domain: wildcart.sim
+    role: competitor
+    archetype: ecommerce
+    counts: {product: 3000, blog: 600, tag: 1000}
+events:
+  - id: ev-category-guides
+    site: summitgear.sim
+    template: category
+    kind: refresh
+    cluster: tents
+    pages: 6
+    date: 2026-08-05
+    spread_days: 7
+    changes: {words_mult: 6.0, add_sections: 4, add_faq: 5, add_schema: [FAQPage]}
+  - id: ev-product-bulk
+    site: wildcart.sim
+    template: product
+    kind: bulk_add
+    cluster: tents
+    pages: 500
+    date: 2026-08-08
+    spread_days: 5
+effects:
+  - id: fx-displacement
+    cause: ev-category-guides
+    cluster: tents
+    own_loss: 3.0
+    competitor_gain: 4.0
+    lag_days: 7
+    ramp_days: 14
+confounders:
+  - id: cf-core-update
+    date: 2026-09-01
+    own_shift: 1.0
+    ramp_days: 5

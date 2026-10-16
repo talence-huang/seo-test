@@ -49,9 +49,11 @@ flowchart LR
 | 1.5 | Prompt injection 頁面 | 同上 |
 | 1.6 | 時間軸與因果事件；模擬 `rank_query`、`history` | `simweb/timeline.py`、`apis.py` |
 | 1.7 | `httpx.MockTransport` 路由 | `simweb/transport.py` |
-| 1.8 | 6 個情境與標準答案 `truth.yaml`（4 訓練 / 2 測試） | `evals/scenarios/` |
+| 1.8 | 6 個情境（4 訓練 / 2 測試）；標準答案由植入事件**自動推導**（`simweb/truth.py`），不另外手寫，避免與事件不一致 | `evals/scenarios/*.yaml` |
 
-**完成定義**：`seo-intel simweb inspect --scenario s1` 可列出網站規模、範本分布、植入事件；單元測試確認同種子結果一致、反爬行為可觸發。
+**完成定義**：`seo-intel simweb inspect --scenario s1` 可列出網站規模、範本分布、植入事件、標準答案與植入效應可觀察性；單元測試確認同種子結果一致、反爬行為可觸發。
+
+**實作結果（已完成）**：主要競品站皆約 1.9–2.1 萬頁；6 個情境的植入效應皆可在排名資料中觀察到，且對照組可分辨混淆因子；SimWeb 測試 34 個（全專案 77 個）通過。
 
 ---
 

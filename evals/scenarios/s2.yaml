@@ -1,0 +1,68 @@
+# s2（訓練）電商站：競品內容策略
+# 真相：trailpeak.sim 新上線 /buying-guide/ 範本（90 篇長篇選購指南、HowTo schema），在 hiking boots 主題大幅成長
+# 干擾項：gearbarn.sim 同期小幅更新登山靴商品頁（規格 / 價格）
+id: s2
+split: train
+archetype: ecommerce
+seed: 202
+now: 2026-10-01
+goal:
+  type: competitor_content_strategy
+  question: 競品 trailpeak.sim 在「hiking boots」主題快速成長，它採用了什麼內容策略？
+  own_site: own-outdoor.sim
+  competitors: [trailpeak.sim, gearbarn.sim]
+  focus_competitor: trailpeak.sim
+  cluster: hiking boots
+  window: [2026-06-01, 2026-10-01]
+sites:
+  - domain: own-outdoor.sim
+    role: own
+    archetype: ecommerce
+    counts: {product: 1500, blog: 300, tag: 400, review: 500}
+  - domain: trailpeak.sim
+    role: competitor
+    archetype: ecommerce
+    counts: {product: 9000, blog: 2000, tag: 5000, review: 3000, brand: 300}
+    extra_templates:
+      - name: buying_guide
+        kind: guide
+        prefix: /buying-guide/
+        count: 90
+        clusters: [hiking boots]
+        words: [1400, 2200]
+        schema_types: [Article, HowTo]
+        sections: [5, 8]
+        archived_rate: 0.5
+        launched_by: ev-guide-launch
+    waf_prefixes: [/reviews/]
+    flaky_rate: 0.03
+    malformed_rate: 0.01
+    injection: {template: buying_guide}
+  - domain: gearbarn.sim
+    role: competitor
+    archetype: ecommerce
+    counts: {product: 4000, blog: 800, tag: 1500}
+events:
+  - id: ev-guide-launch
+    site: trailpeak.sim
+    template: buying_guide
+    kind: launch
+    date: 2026-07-15
+    spread_days: 21
+  - id: ev-product-touch
+    site: gearbarn.sim
+    template: product
+    kind: refresh
+    cluster: hiking boots
+    pages: 150
+    date: 2026-07-20
+    spread_days: 7
+    changes: {words_mult: 1.05}
+effects:
+  - id: fx-growth
+    cause: ev-guide-launch
+    cluster: hiking boots
+    own_loss: 2.0
+    competitor_gain: 6.0
+    lag_days: 10
+    ramp_days: 21
