@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+
+# 執行期產物
+data/
+runs/
+evals/reports/
+
+# 本機機密
+.env

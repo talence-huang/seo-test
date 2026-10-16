@@ -1,0 +1,40 @@
+# LLM 角色與價格表
+# 價格來源：Claude API 參考資料（快取於 2026-10-06），單位為每百萬 token 的美元價格。
+
+roles:
+  planner:        # 定義目標、規劃資訊需求、提出鑑別問題
+    model: claude-opus-5-5
+    effort: medium
+    max_tokens: 16000
+    fallback: true
+  hypothesizer:   # 形成假設
+    model: claude-opus-5-5
+    effort: high
+    max_tokens: 16000
+    fallback: true
+  verifier:       # 紅隊驗證者
+    model: claude-opus-5-5
+    effort: high
+    max_tokens: 16000
+    fallback: true
+  extractor:      # 證據候選頁的語意摘要
+    model: claude-haiku-5-5
+    effort: low
+    max_tokens: 4000
+    fallback: false   # Haiku 5.5 不支援 server-side fallback
+
+pricing:
+  claude-opus-5-5:
+    input: 4.00
+    output: 20.00
+    cache_read: 0.20
+    cache_write: 5.00        # 5 分鐘 TTL 快取寫入約為輸入價 1.25 倍
+  claude-haiku-5-5:
+    input: 0.10
+    output: 0.50
+    cache_read: 0.01         # 估計值：輸入價約 0.1 倍
+    cache_write: 0.125
+    long_context:            # 單次輸入超過 100K token 時適用
+      threshold_tokens: 100000
+      input: 0.50
+      output: 2.50

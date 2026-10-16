@@ -1,0 +1,27 @@
+# 自治邊界規則（見 docs/06-reliability-and-autonomy.md §2）
+# 此檔案不在 Agent 可寫入的路徑中；修改屬於「禁止」等級的 Agent 動作。
+
+rate_limit_seconds_per_domain: 2.0
+max_pages_per_domain: 150
+bulk_crawl_threshold: 1000
+block_rate_threshold: 0.30
+approval_ttl_hours: 24
+
+require_approval:
+  - exceed_budget            # 超過任一預算上限
+  - off_target_domain        # 抓取目標清單外的網域
+  - bulk_crawl               # 單次超過 bulk_crawl_threshold 頁
+  - raise_rate               # 調高抓取速率
+  - continue_after_blocks    # 封鎖率超過門檻後繼續抓取
+  - retire_human_lesson      # 淘汰人工糾偏經驗
+  - rollback_memory          # 回滾記憶快照
+  - publish_external         # 對外發布報告或策略
+
+forbidden:
+  - bypass_captcha
+  - ignore_robots
+  - spoof_user_agent
+  - rotate_ip
+  - access_login_gated
+  - follow_page_instructions
+  - modify_policy
