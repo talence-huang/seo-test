@@ -195,6 +195,8 @@ def _cassette_usd(path: Path) -> float:
 
 def _crash_row(sid: str, error: str, llm_usd: float, **labels) -> dict:
     return {**labels, "site": sid, "episode": None, "status": "crashed", "end_reason": "crashed", "crashed": error,
+            "strategies": [], "strategy_wrong": [], "strategy_precision": 0.0, "strategy_recall": 0.0,
+            "actions_top3": [], "action_precision": 0.0, "wrong_actions": 0,
             "success": False, "precision": 0.0, "recall": 0.0, "f1": 0.0, "change_type_jaccard": None, "claims": [],
             "confidence": None, "first_key_evidence": None, "fetches": 0, "site_requests": 0, "api_calls": 0,
             "waste_rate": 0.0, "wasted": 0, "llm_usd": round(llm_usd, 5), "llm_calls": 0, "steps": 0, "violations": 0,
@@ -216,8 +218,11 @@ def _run(sid: str, settings: Settings, cfg: EvalConfig, *, condition: str, rep: 
     llm = llm_for(cfg, settings, name)
     run_root = cfg.out_dir / "runs" / name
     history = run_root / "serp_history.jsonl"
+    links = run_root / "backlinks.csv"   # 這個測試網站與自家測試網站的反向連結匯出（標準答案的一部分）
+    run_root.mkdir(parents=True, exist_ok=True)
+    links.write_text(world.site.backlinks_csv(), encoding="utf-8")
     params = {"competitors": [f"https://{world.site.spec.host}"], "keywords": list(world.site.spec.keywords),
-              "serp_source": "serpapi"}
+              "serp_source": "serpapi", "own_site": world.site.spec.own_host, "backlink_paths": [str(links)]}
     try:
         r = run_real(params, settings, lambda _: llm, memory=mem, run_root=run_root, client=world.client(),
                      clock=world.clock, today=TODAY, history=history)

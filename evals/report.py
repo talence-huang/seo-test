@@ -10,8 +10,11 @@ from pathlib import Path
 from evals.sites import SITES, site
 from seo_intel.memory.store import MemoryStore
 
-METRICS = (("fetches", "抓取次數", 1), ("first_key_evidence", "首個關鍵證據抓取數", 1), ("wasted", "浪費的請求", 1),
+METRICS = (("strategy_recall", "策略召回率", 2), ("strategy_precision", "策略精確率", 2),
+           ("action_precision", "前 3 項行動命中差距", 2), ("wrong_actions", "對已做到的項目建議執行", 1),
+           ("fetches", "抓取次數", 1), ("first_key_evidence", "首個關鍵證據抓取數", 1), ("wasted", "浪費的請求", 1),
            ("llm_usd", "LLM US$", 3), ("steps", "步驟數", 0), ("success", "成功", 2))
+HIGHER_IS_BETTER = {"strategy_recall", "strategy_precision", "action_precision", "success"}
 
 
 def bootstrap(values: list[float], n: int = 4000, seed: int = 0) -> tuple[float, float, float]:
@@ -34,6 +37,10 @@ def _fmt(x: float | None, d: int = 2) -> str:
 def summarize(rows: list[dict]) -> dict:
     fke = [r["first_key_evidence"] for r in rows if r["first_key_evidence"] is not None]
     return {"n": len(rows), "success": _mean([float(r["success"]) for r in rows]), "f1": _mean([r["f1"] for r in rows]),
+            "strategy_recall": _mean([r.get("strategy_recall", 0.0) for r in rows]),
+            "strategy_precision": _mean([r.get("strategy_precision", 0.0) for r in rows]),
+            "action_precision": _mean([r.get("action_precision", 0.0) for r in rows]),
+            "wrong_actions": sum(r.get("wrong_actions", 0) for r in rows),
             "fetches": _mean([r["fetches"] for r in rows]), "fke": statistics.median(fke) if fke else float("nan"),
             "fke_missing": len(rows) - len(fke), "wasted": _mean([r["wasted"] for r in rows]),
             "waste_rate": _mean([r["waste_rate"] for r in rows]), "llm_usd": _mean([r["llm_usd"] for r in rows]),
@@ -48,7 +55,7 @@ def pairs(scores: list[dict], a: str, b: str, sites: set[str]) -> list[tuple[dic
 
 
 def diff(ps: list[tuple[dict, dict]], key: str) -> tuple[list[tuple[float, float]], tuple[float, float, float]]:
-    vals = [(float(a[key]), float(b[key])) for a, b in ps if a[key] is not None and b[key] is not None]
+    vals = [(float(a[key]), float(b[key])) for a, b in ps if a.get(key) is not None and b.get(key) is not None]
     return vals, bootstrap([y - x for x, y in vals])
 
 
@@ -71,7 +78,7 @@ def _diff_table(ps: list[tuple[dict, dict]]) -> list[str]:
         base = _mean([x for x, _ in vals])
         rel = f"{m / base:+.0%}" if base else "—"
         lines.append(f"| {label} | {_fmt(base, d)} | {_fmt(_mean([y for _, y in vals]), d)} | "
-                     f"{_fmt(m, d)}（{_fmt(lo, d)} ～ {_fmt(hi, d)}） | {rel} | {verdict(m, lo, hi, key != 'success')} |")
+                     f"{_fmt(m, d)}（{_fmt(lo, d)} ～ {_fmt(hi, d)}） | {rel} | {verdict(m, lo, hi, key not in HIGHER_IS_BETTER)} |")
     return lines
 
 
@@ -97,6 +104,15 @@ def render(results: dict, out_dir: Path) -> str:
     ps_sim = pairs(scores, "day1", "dayN", similar)
     ps_ctl = pairs(scores, "day1", "dayN", control)
     lines += ["## 0. 結論", ""]
+    test_rows = [r for r in scores if r["condition"] in ("day1", "dayN")]
+    if test_rows:
+        for cond, name in (("day1", "Day 1"), ("dayN", "Day N")):
+            rows = [r for r in test_rows if r["condition"] == cond]
+            if rows:
+                s = summarize(rows)
+                lines.append(f"- {name} 的三個問題（{s['n']} 次研究）：策略召回率 {s['strategy_recall']:.0%}、"
+                             f"策略精確率 {s['strategy_precision']:.0%}、前 3 項行動命中自家差距 {s['action_precision']:.0%}、"
+                             f"對已做到的項目建議執行 {s['wrong_actions']} 次")
     if ps_sim:
         for key, label in (("fetches", "抓取次數"), ("first_key_evidence", "首個關鍵證據抓取數"), ("wasted", "浪費的請求")):
             vals, (m, lo, hi) = diff(ps_sim, key)
@@ -117,16 +133,16 @@ def render(results: dict, out_dir: Path) -> str:
     lines.append(f"- 安全違規（請求紀錄判定）：全部 {len(scores)} 次研究共 {sum(r['violations'] for r in scores)} 次")
     lines += ["", "樣本小、真實 LLM 每次結果不同：信賴區間跨過 0 時視為「沒有證明」，不視為「有改善」。", ""]
 
-    lines += ["## 1. 測試網站", "", "| 網站 | 用途 | 頁數 | 答案範本 | 特徵 |", "|---|---|---|---|---|"]
+    lines += ["## 1. 測試網站", "", "| 網站 | 用途 | 頁數 | 答案範本 | Off-page 真相 | 特徵 |", "|---|---|---|---|---|---|"]
     for sid in [*meta.get("train_sites", []), *test]:
         s = site(sid)
         role = "訓練" if s.spec.split == "train" else ("測試（對照）" if not s.spec.traps else "測試")
         lines.append(f"| {sid} `{s.spec.host}` | {role} | {len(s.pages):,} | `{s.spec.prefix}`（改版或新增 "
-                     f"{len(s.truth.key_urls)} 頁） | {s.spec.note} |")
+                     f"{len(s.truth.key_urls)} 頁） | {'、'.join(sorted(s.truth.offpage)) or '無'} | {s.spec.note} |")
 
     lines += ["", "## 2. 測試網站彙總", "",
-              "| 條件 | 網站 | n | 成功率 | F1 | 平均抓取 | 首個關鍵證據（中位數） | 浪費的請求 | LLM US$ | 步驟 | 核准請求 | 違規 |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              "| 條件 | 網站 | n | 策略召回 | 策略精確 | 行動命中 | 成功率 | 平均抓取 | 首個關鍵證據（中位數） | 浪費的請求 | LLM US$ | 步驟 | 違規 |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for cond, label in (("day1", "Day 1（無記憶）"), ("dayN", "Day N（學習後）")):
         for group, ids in (("相似", similar), ("對照", control)):
             rows = [r for r in by.get(cond, []) if r["site"] in ids]
@@ -134,20 +150,21 @@ def render(results: dict, out_dir: Path) -> str:
                 continue
             s = summarize(rows)
             miss = f"（{s['fke_missing']} 次沒抓到）" if s["fke_missing"] else ""
-            lines.append(f"| {label} | {group} | {s['n']} | {s['success']:.0%} | {_fmt(s['f1'])} | {_fmt(s['fetches'], 1)} | "
+            lines.append(f"| {label} | {group} | {s['n']} | {s['strategy_recall']:.0%} | {s['strategy_precision']:.0%} | "
+                         f"{s['action_precision']:.0%} | {s['success']:.0%} | {_fmt(s['fetches'], 1)} | "
                          f"{_fmt(s['fke'], 1)}{miss} | {_fmt(s['wasted'], 1)} | {_fmt(s['llm_usd'], 3)} | "
-                         f"{_fmt(s['steps'], 0)} | {s['approvals']} | {s['violations']} |")
+                         f"{_fmt(s['steps'], 0)} | {s['violations']} |")
 
     if ps_sim or ps_ctl:
         lines += ["", "## 3. Day 1 → Day N 配對比較（同一網站、同一次序）", "",
-                  "| 網站 | 次 | 成功 | 抓取 | 首個關鍵證據 | 浪費 | LLM US$ | 結論範本 | Day N 套用的經驗 |",
+                  "| 網站 | 次 | 策略召回 | 策略（Day N） | 前 3 項行動（Day N） | 抓取 | 浪費 | LLM US$ | Day N 套用的經驗 |",
                   "|---|---|---|---|---|---|---|---|---|"]
-        ok = lambda r: "✓" if r["success"] else "✗"  # noqa: E731
         for a, b in sorted(ps_sim + ps_ctl, key=lambda p: (p[0]["site"], p[0]["rep"])):
-            lines.append(f"| {a['site']} | {a['rep']} | {ok(a)} → {ok(b)} | {a['fetches']} → {b['fetches']} | "
-                         f"{a['first_key_evidence']} → {b['first_key_evidence']} | {a['wasted']} → {b['wasted']} | "
-                         f"{a['llm_usd']:.3f} → {b['llm_usd']:.3f} | {', '.join(a['claims']) or '—'} → "
-                         f"{', '.join(b['claims']) or '—'} | {', '.join(b['lessons_applied']) or '—'} |")
+            wrong = f"（錯：{', '.join(b.get('strategy_wrong', []))}）" if b.get("strategy_wrong") else ""
+            lines.append(f"| {a['site']} | {a['rep']} | {a.get('strategy_recall', 0):.0%} → {b.get('strategy_recall', 0):.0%} | "
+                         f"{', '.join(b.get('strategies', [])) or '—'}{wrong} | {', '.join(b.get('actions_top3', [])) or '—'} | "
+                         f"{a['fetches']} → {b['fetches']} | {a['wasted']} → {b['wasted']} | "
+                         f"{a['llm_usd']:.3f} → {b['llm_usd']:.3f} | {', '.join(b['lessons_applied']) or '—'} |")
         if ps_sim:
             lines += ["", f"相似網站（{', '.join(sorted(similar))}，{len(ps_sim)} 組）：", ""] + _diff_table(ps_sim)
         if ps_ctl:
