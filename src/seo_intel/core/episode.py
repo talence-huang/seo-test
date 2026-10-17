@@ -42,14 +42,18 @@ def _block_rate(ctx: EpisodeContext, domain: str) -> tuple[float, int]:
 
 
 def build_context(state: EpisodeState, settings: Settings, llm: LLMClient, client: httpx.Client, clock: Clock,
-                  run_dir: Path, frontier: Frontier | None = None) -> EpisodeContext:
+                  run_dir: Path, frontier: Frontier | None = None, memory=None) -> EpisodeContext:
     run_dir.mkdir(parents=True, exist_ok=True)
     ledger = BudgetLedger(settings.budget, state.budget, clock)
     http = HttpToolkit(client, clock, ledger, rate_interval=settings.policy.rate_limit_seconds_per_domain)
     ctx = EpisodeContext(state=state, settings=settings, llm=llm, http=http, ledger=ledger, policy=None,
                          rank=RankClient(http), archive=ArchiveClient(http), clock=clock, run_dir=run_dir,
-                         frontier=frontier)
+                         frontier=frontier, memory=memory)
     ctx.policy = PolicyGate(settings.policy, state.task, http, ledger, block_rate=lambda d: _block_rate(ctx, d))
+    if frontier is not None and state.goal is not None and memory is not None:   # 續跑：重新接上記憶
+        from seo_intel.core.steps import memory_setup
+
+        memory_setup(ctx)
     return ctx
 
 

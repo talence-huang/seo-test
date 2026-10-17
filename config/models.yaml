@@ -22,6 +22,11 @@ roles:
     effort: medium
     max_tokens: 16000
     fallback: true
+  reflector:      # 把人工糾偏的文字轉成可套用的經驗（固定詞彙的偏置）
+    model: claude-opus-5-5
+    effort: medium
+    max_tokens: 8000
+    fallback: true
   extractor:      # 證據候選頁的語意摘要（Phase 2 起未啟用：確定性萃取已足夠）
     model: claude-haiku-5-5
     effort: low

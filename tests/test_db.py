@@ -8,7 +8,7 @@ from seo_intel.store.db import utc_now
 
 EXPECTED_TABLES = {
     "approvals", "claims", "episodes", "evidence", "feedback", "hypotheses",
-    "lessons", "llm_calls", "observations", "steps", "template_stats", "tool_calls",
+    "llm_calls", "observations", "steps", "tool_calls",
 }
 
 
@@ -38,6 +38,19 @@ def test_reopen_is_idempotent(tmp_path):
     again = Database(path)
     assert set(again.tables()) == EXPECTED_TABLES
     again.close()
+
+
+def test_v1_database_is_migrated(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("CREATE TABLE lessons (id TEXT); CREATE TABLE template_stats (x TEXT); PRAGMA user_version = 1;")
+    conn.close()
+    db = Database(path)
+    assert "lessons" not in db.tables() and "template_stats" not in db.tables()
+    assert db.query("PRAGMA user_version")[0][0] == SCHEMA_VERSION
+    db.close()
 
 
 def test_json_columns_are_canonical(db):

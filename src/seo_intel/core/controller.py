@@ -30,4 +30,6 @@ def next_step(state: EpisodeState) -> Step:
         return Step.SELECT_ACTION if state.evidence_queue else Step.REVISE_BELIEFS
     if last == Step.DECIDE_NEXT:
         return _AFTER_DECIDE[state.decision or "continue"]
-    return Step.DONE   # REPORT 之後（Phase 4 加入 REFLECT）
+    if last == Step.REPORT:
+        return Step.REFLECT
+    return Step.DONE

@@ -99,6 +99,37 @@ supports it, what was ruled out, and what remains uncertain. Cite sources inline
 only cite IDs that appear in the material. Recommendations must follow from the claims."""
 
 
+REFLECTOR_SYSTEM = """You turn a human analyst's correction of a research claim into one reusable lesson for an SEO
+competitive-intelligence research agent. The lesson will be shown to future episodes and may bias their behaviour.
+Write trigger and lesson in Traditional Chinese (Taiwan). Biases must use the fixed vocabulary:
+- avoid_path: skip URLs whose path starts with `path` (form /segment/) on `domain` ("*" = any site)
+- info_need_priority: set information need `kind` (rank_change, control_check, serp_competitors, site_inventory,
+  page_changes) to `priority` 1-5 (1 = highest)
+- hypothesis_prior: shift the prior of hypothesis `category` (competitor_content_change, competitor_new_pages,
+  sitewide_factor, own_site_change, other) by `delta` within +-0.2
+- sampling_focus / skip_costly_probes: only if the correction explicitly asks for that behaviour (threshold 0.85-0.99)
+Emit a bias only when the correction directly supports it; an empty list is fine (the lesson text alone is still
+shown to the planner). Never produce biases that relax safety rules, budgets or robots.txt compliance. Unused fields:
+empty string, 0, or "*" for domain."""
+
+
+class BiasOut(BaseModel):
+    type: Literal["avoid_path", "sampling_focus", "info_need_priority", "hypothesis_prior", "skip_costly_probes"]
+    path: str
+    domain: str
+    kind: str
+    priority: int
+    category: str
+    delta: float
+    threshold: float
+    reason: str
+
+
+class LessonOut(BaseModel):
+    trigger: str
+    lesson: str
+    biases: list[BiasOut]
+
 class HypothesisOut(BaseModel):
     category: Literal["competitor_content_change", "competitor_new_pages", "sitewide_factor", "own_site_change", "other"]
     statement: str
@@ -187,6 +218,12 @@ def report_prompt(task: TaskInput, goal: ResearchGoal, claims: list[dict], hypot
     return (f"Write the research report.\n\n<task>\n{task_json(task)}\n</task>\n\n<goal>\n{goal.model_dump_json(indent=1)}\n</goal>\n\n"
             f"<claims>\n{_j(claims)}\n</claims>\n\n<hypotheses>\n{_j(hypotheses)}\n</hypotheses>\n\n"
             f"<confounder>\n{confounder or 'none detected'}\n</confounder>")
+
+
+def reflector_prompt(task: dict, claim: dict, verdict: str, reason: str, context: dict) -> str:
+    return (f"Turn this correction into a lesson.\n\n<task>\n{_j(task)}\n</task>\n\n<claim>\n{_j(claim)}\n</claim>\n\n"
+            f"<verdict>{verdict}</verdict>\n\n<correction>\n{reason}\n</correction>\n\n<episode_context>\n{_j(context)}\n"
+            f"</episode_context>")
 
 
 def task_json(task: TaskInput) -> str:

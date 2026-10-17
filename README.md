@@ -12,7 +12,8 @@
 | 1 | SimWeb 研究環境（6 個情境、反爬行為、陷阱、注入頁、模擬排名與歷史、自動推導標準答案） | 完成 |
 | 2 | 研究迴圈與可觀察性（狀態機、工具層、Frontier、預算、PolicyGate 基本版、即時主控台、trace、timeline、暫停續跑） | 完成 |
 | 3 | 假設、證據與報告（可證偽假設、6 種證據探針、log-odds 信心、紅隊驗證、結構化主張、引用驗證） | 完成 |
-| 4–6 | 學習機制、自治邊界、評測 | 未開始 |
+| 4 | 學習機制（M1 經驗庫、M2 URL 價值、REFLECT、人工糾偏、經驗治理） | 完成（FakeLLM 驗證：s1 連跑抓取 69 → 49 → 38） |
+| 5–6 | 自治邊界、評測 | 未開始 |
 
 ## 安裝
 
@@ -35,7 +36,15 @@ seo-intel simweb list                    # 列出研究情境
 seo-intel simweb inspect --scenario s1   # 情境細節、標準答案、植入效應可觀察性
 seo-intel simweb fetch -s s1 <網址>      # 在模擬世界中抓取一個網址
 seo-intel research --scenario s1 --step  # 逐步觀察研究迴圈（--llm fake 免費）
-seo-intel research resume <episode>      # 從檢查點續跑
+seo-intel research resume <episode>      # 從檢查點續跑（沿用原本的記憶設定）
+seo-intel research -s s1 --no-memory     # 不用記憶（Day 1）；--memory <檔案> 指定記憶、--ablate M1,M2 消融
+seo-intel memory list                    # 經驗庫：狀態、來源、支持數、套用成效（--all 含已淘汰）
+seo-intel memory show L-1                # 一條經驗的內容與稽核軌跡
+seo-intel memory stats                   # M2 範本價值與 episode 成效
+seo-intel memory snapshot <檔案>         # 備份記憶
+seo-intel memory retire L-1 --reason ... # 人工淘汰經驗
+seo-intel feedback correct <episode> --claim C1 --verdict wrong --reason "..."   # 人工糾偏
+seo-intel feedback list                  # 糾偏紀錄
 seo-intel trace list                     # 列出 episode
 seo-intel trace show <episode>           # 終端機重播完整時間軸
 seo-intel trace html <episode>           # 產生 runs/<episode>/timeline.html
@@ -71,6 +80,7 @@ src/seo_intel/
   core/            研究迴圈：狀態機、步驟、行動候選、Frontier、預算、PolicyGate、檢查點
   tools/           HTTP 包裝層、萃取、差異、排名、歷史快照、網站探勘
   observe/         即時主控台、trace、資料庫紀錄、timeline.html
+  memory/          記憶：經驗庫（M1）、URL 價值先驗（M2）、REFLECT 規則、人工糾偏、治理（data/memory.db）
   cli.py           seo-intel 指令
 src/simweb/        研究環境（獨立套件）：世界產生器、反爬行為、模擬排名與歷史 API
 evals/scenarios/   6 個研究情境（4 訓練 / 2 測試）

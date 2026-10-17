@@ -9,6 +9,7 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from seo_intel import __version__
@@ -25,12 +26,16 @@ llm_app = typer.Typer(help="LLM 連線", no_args_is_help=True)
 simweb_app = typer.Typer(help="SimWeb 研究環境", no_args_is_help=True)
 research_app = typer.Typer(help="執行研究 episode（seo-intel research --scenario s1）")
 trace_app = typer.Typer(help="檢視研究過程", no_args_is_help=True)
+memory_app = typer.Typer(help="記憶（M1 經驗庫、M2 URL 價值）", no_args_is_help=True)
+feedback_app = typer.Typer(help="人工糾偏", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(config_app, name="config")
 app.add_typer(llm_app, name="llm")
 app.add_typer(simweb_app, name="simweb")
 app.add_typer(research_app, name="research")
 app.add_typer(trace_app, name="trace")
+app.add_typer(memory_app, name="memory")
+app.add_typer(feedback_app, name="feedback")
 
 console = Console()
 DbPath = Annotated[Path, typer.Option("--path", help="SQLite 檔案路徑")]
@@ -265,6 +270,31 @@ LlmOpt = Annotated[str, typer.Option("--llm", help="live：真實 API（自動�
 StepOpt = Annotated[bool, typer.Option("--step", help="逐步模式：每一步暫停，可隨時存檔離開")]
 QuietOpt = Annotated[bool, typer.Option("--quiet", help="不輸出即時步驟")]
 VerboseOpt = Annotated[bool, typer.Option("--verbose", help="也顯示例行的「繼續」判斷")]
+MemoryOpt = Annotated[Path | None, typer.Option("--memory", help="記憶資料庫（跨 episode 共用，預設 data/memory.db）")]
+NoMemoryOpt = Annotated[bool, typer.Option("--no-memory", help="不使用記憶（相當於 Day 1）")]
+AblateOpt = Annotated[str, typer.Option("--ablate", help="關閉部分記憶做消融實驗，例如 M1 或 M1,M2")]
+
+
+def _default_memory() -> Path:
+    from seo_intel.core.runner import DEFAULT_MEMORY
+
+    return DEFAULT_MEMORY
+
+
+def _open_memory(run_dir: Path, path: Path | None, ablate: str, *, resumed: bool):
+    """開啟記憶並把設定寫入 run 目錄（續跑時沿用同一份記憶設定）。"""
+    from seo_intel.core.runner import open_memory
+
+    cfg_path = run_dir / "memory.json"
+    if resumed and cfg_path.is_file():
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        path, flags = (Path(cfg["path"]) if cfg["path"] else None), frozenset(cfg["ablate"])
+    else:
+        flags = frozenset(x.strip().upper() for x in ablate.split(",") if x.strip())
+        if bad := flags - {"M1", "M2"}:
+            raise typer.BadParameter(f"--ablate 只接受 M1、M2：{', '.join(sorted(bad))}")
+        cfg_path.write_text(json.dumps({"path": str(path) if path else None, "ablate": sorted(flags)}), encoding="utf-8")
+    return open_memory(path, flags)
 
 
 class StepPrompter:
@@ -314,12 +344,17 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
     console.rule(f"[bold]Episode {st.id}{'（續跑）' if resumed else ''}")
     console.print(f"[bold]任務[/]：{st.task.question}")
     console.print(f"自家站 {st.task.own_site} · 競品 {', '.join(st.task.competitors)} · 今天 {st.task.today}\n")
+    mem = ectx.memory
+    console.print(f"記憶：{mem.store.path}（M1 {'開' if mem.use_m1 else '關'}、M2 {'開' if mem.use_m2 else '關'}）\n"
+                  if mem else "記憶：未啟用（Day 1）\n")
     loop = ResearchLoop(ectx, observers, step_hook=StepPrompter(console) if step else None)
     try:
         loop.run()
     finally:
         db.close()
         _write_artifacts(ectx, sim)
+        if mem:
+            mem.store.close()
     console.rule("[bold]結果")
     env = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
     viol = env["violations"]
@@ -357,6 +392,9 @@ def research(
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
     path: DbPath = DEFAULT_DB,
+    memory: MemoryOpt = None,
+    no_memory: NoMemoryOpt = False,
+    ablate: AblateOpt = "",
 ) -> None:
     """在 SimWeb 情境中執行一個研究 episode。"""
     if typer_ctx.invoked_subcommand:
@@ -376,7 +414,9 @@ def research(
     state = new_state(task, sim.clock)
     run_dir = RUNS_DIR / state.id
     run_dir.mkdir(parents=True, exist_ok=True)
-    ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, cassette), sim.client(), sim.clock, run_dir)
+    mem = _open_memory(run_dir, None if no_memory else (memory or _default_memory()), ablate, resumed=False)
+    ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, cassette), sim.client(), sim.clock, run_dir,
+                         memory=mem)
     _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
 
 
@@ -408,8 +448,9 @@ def research_resume(
     settings = get_settings()
     sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at))
     truncate_trace(run_dir / "trace.jsonl", state.seq)
+    mem = _open_memory(run_dir, _default_memory(), "", resumed=True)
     ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, None), sim.client(), sim.clock, run_dir,
-                         frontier)
+                         frontier, memory=mem)
     _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=True)
 
 
@@ -469,6 +510,175 @@ def trace_html(episode_id: Annotated[str, typer.Argument(help="Episode ID")]) ->
                            frontier.to_dict() if frontier else None, env)
     (d / "timeline.html").write_text(html, encoding="utf-8")
     console.print(f"已產生：{d / 'timeline.html'}")
+
+
+# ---------- 記憶 ----------
+
+def _store(memory: Path | None):
+    from seo_intel.memory.store import MemoryStore
+
+    return MemoryStore(memory or _default_memory())
+
+
+_LESSON_STATUS = {"active": "[green]生效[/]", "candidate": "[yellow]候選[/]", "retired": "[dim]淘汰[/]"}
+
+
+@memory_app.command("list")
+def memory_list(
+    show_all: Annotated[bool, typer.Option("--all", help="也列出已淘汰的經驗")] = False,
+    memory: MemoryOpt = None,
+) -> None:
+    """列出經驗（M1）：狀態、來源、支持數、套用成效。"""
+    store = _store(memory)
+    t = Table("ID", "狀態", "來源", "支持", "套用", "成功率", "衝突", "經驗", "偏置", title=f"經驗庫 {store.path}")
+    for x in store.lessons():
+        if x.status == "retired" and not show_all:
+            continue
+        rate = f"{x.success_rate:.0%}" if x.success_rate is not None else "—"
+        t.add_row(x.id, _LESSON_STATUS[x.status], x.source, str(x.support), str(x.applied), rate, str(x.conflicts),
+                  x.lesson, "；".join(b.describe() for b in x.biases) or "僅文字")
+    console.print(t)
+    store.close()
+
+
+@memory_app.command("show")
+def memory_show(lesson_id: Annotated[str, typer.Argument(help="經驗 ID，例如 L-1")], memory: MemoryOpt = None) -> None:
+    """顯示一條經驗的完整內容與稽核軌跡（何時建立、被誰支持、套用結果、淘汰原因）。"""
+    store = _store(memory)
+    x = store.lesson(lesson_id)
+    if x is None:
+        console.print(f"[red]找不到經驗[/] {lesson_id}")
+        raise typer.Exit(1)
+    console.print(f"[bold]{x.id}[/] {_LESSON_STATUS[x.status]} · 來源 {x.source} · 適用 {x.scope}")
+    console.print(f"觸發情境：{x.trigger}\n經驗：{x.lesson}")
+    for b in x.biases:
+        console.print(f"  偏置：{b.describe()}")
+    console.print(f"支持 {x.support} · 套用 {x.applied} · 成功 {x.applied_success} · 衝突 {x.conflicts}"
+                  + (f" · 淘汰原因：{x.retired_reason}" if x.retired_reason else ""))
+    console.print(f"來源 episode：{', '.join(x.provenance.get('episodes', []))}")
+    t = Table("時間", "Episode", "事件", "說明", title="稽核軌跡")
+    for e in store.events(lesson_id):
+        t.add_row(e["ts"][:19], e["episode_id"] or "—", e["event"], e["detail"])
+    console.print(t)
+    store.close()
+
+
+@memory_app.command("stats")
+def memory_stats(limit: Annotated[int, typer.Option(help="列出幾筆 M2 統計")] = 20, memory: MemoryOpt = None) -> None:
+    """M2 URL 價值統計與 episode 成效。"""
+    store = _store(memory)
+    t = Table("層級", "鍵", "命中 α", "未命中 β", "價值", "episode 數", title="M2 範本價值（Beta 分佈）")
+    from seo_intel.memory.priors import LABEL
+
+    for r in store.top_stats(limit):
+        t.add_row(LABEL.get(r["scope"], r["scope"]), r["key"], f"{r['alpha']:g}", f"{r['beta']:g}", f"{r['mean']:.2f}",
+                  str(r["episodes"]))
+    console.print(t)
+    o = Table("Episode", "情境", "成功", "人工糾偏", "抓取", "API", "LLM US$", "套用經驗", title="Episode 成效")
+    for r in store.conn.execute("SELECT * FROM episode_outcomes ORDER BY ts"):
+        o.add_row(r["episode_id"], r["scenario"] or "—", "✓" if r["success"] else "✗", "是" if r["corrected"] else "",
+                  str(r["fetches"]), str(r["api_calls"]), f"{r['llm_usd']:.4f}", ", ".join(json.loads(r["lessons_json"])))
+    console.print(o)
+    store.close()
+
+
+@memory_app.command("snapshot")
+def memory_snapshot(dest: Annotated[Path, typer.Argument(help="快照檔路徑")], memory: MemoryOpt = None) -> None:
+    """備份記憶（評測前凍結、或回溯錯誤學習時使用）。"""
+    store = _store(memory)
+    out = store.snapshot(dest)
+    store.close()
+    console.print(f"已備份：{out}")
+
+
+@memory_app.command("retire")
+def memory_retire(
+    lesson_id: Annotated[str, typer.Argument(help="經驗 ID")],
+    reason: Annotated[str, typer.Option("--reason", help="淘汰原因（寫入稽核軌跡）")],
+    memory: MemoryOpt = None,
+) -> None:
+    """由人工淘汰一條經驗（人工經驗只能由人淘汰）。"""
+    store = _store(memory)
+    x = store.lesson(lesson_id)
+    if x is None:
+        console.print(f"[red]找不到經驗[/] {lesson_id}")
+        raise typer.Exit(1)
+    x.status, x.retired_reason = "retired", f"人工淘汰：{reason}"
+    store.save_lesson(x)
+    store.event(x.id, None, "retired", x.retired_reason)
+    store.close()
+    console.print(f"已淘汰 {lesson_id}：{reason}")
+
+
+# ---------- 人工糾偏 ----------
+
+@feedback_app.command("correct")
+def feedback_correct(
+    episode_id: Annotated[str, typer.Argument(help="Episode ID")],
+    claim: Annotated[str, typer.Option("--claim", help="主張 ID，例如 C1")],
+    verdict: Annotated[str, typer.Option("--verdict", help="correct｜wrong｜partial")],
+    reason: Annotated[str, typer.Option("--reason", help="為什麼（會被轉成經驗，影響之後的研究）")],
+    llm: Annotated[str, typer.Option("--llm", help="live：用 reflector 角色把理由轉成經驗；fake：關鍵字規則（免費）")] = "live",
+    memory: MemoryOpt = None,
+    path: DbPath = DEFAULT_DB,
+) -> None:
+    """人工糾偏：撤回 Agent 從該 episode 學到的東西，並把理由轉成直接生效的人工經驗。"""
+    import sqlite3
+
+    from seo_intel.core.episode import load_checkpoint
+    from seo_intel.memory.correct import correct
+    from seo_intel.store.db import utc_now
+
+    if verdict not in ("correct", "wrong", "partial"):
+        raise typer.BadParameter("--verdict 只接受 correct、wrong、partial")
+    run_dir = _run_dir(episode_id)
+    state, _ = load_checkpoint(run_dir)
+    settings = get_settings()
+    client = None
+    if verdict != "correct" and llm == "fake":
+        from seo_intel.llm.fake_planner import fake_llm
+
+        client = fake_llm(settings.models)
+    elif verdict != "correct" and llm == "live":
+        from seo_intel.llm import AnthropicLLM, RecordingLLM
+
+        client = RecordingLLM(AnthropicLLM(settings.models), run_dir / "feedback_cassette.jsonl")
+    elif verdict != "correct":
+        raise typer.BadParameter("--llm 只接受 live 或 fake")
+    store = _store(memory)
+    try:
+        res = correct(store, state, claim, verdict, reason, client)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        raise typer.Exit(1) from None
+    finally:
+        store.close()
+    db = Database(path)
+    try:
+        db.insert("feedback", {"episode_id": episode_id, "claim_id": f"{episode_id}/{claim}", "verdict": verdict,
+                               "reason": reason, "created_at": utc_now()})
+        stored = "已寫入 intel.db feedback"
+    except sqlite3.IntegrityError:
+        stored = "intel.db 沒有此主張（例如以評測腳本執行），只更新記憶"
+    finally:
+        db.close()
+    console.rule(f"[bold]人工糾偏 {episode_id}/{claim}（{verdict}）")
+    for line in res.lines:
+        console.print(escape(line), highlight=False)
+    for meta in res.calls:
+        console.print(f"[magenta]reflector {meta.model} · US${meta.usd:.4f}[/]")
+    console.print(f"[dim]{stored}[/]")
+
+
+@feedback_app.command("list")
+def feedback_list(memory: MemoryOpt = None) -> None:
+    """列出人工糾偏紀錄。"""
+    store = _store(memory)
+    t = Table("時間", "Episode", "主張", "判定", "理由", "產生的經驗", title="人工糾偏")
+    for r in store.corrections():
+        t.add_row(r["ts"][:19], r["episode_id"], r["claim_id"], r["verdict"], r["reason"], r["lesson_id"] or "—")
+    console.print(t)
+    store.close()
 
 
 if __name__ == "__main__":

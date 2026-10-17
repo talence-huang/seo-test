@@ -130,6 +130,25 @@ def normalize_goal(out: GoalOut | None, task: TaskInput) -> tuple[ResearchGoal, 
                         window_start=ws, window_end=we, success_criteria=out.success_criteria), notes
 
 
+def memory_setup(ctx: EpisodeContext) -> list[str]:
+    """載入記憶並接上 frontier（新 episode 與續跑都會呼叫）。回傳可讀的說明。"""
+    mem, st = ctx.memory, ctx.state
+    if mem is None:
+        return ["記憶：未啟用（每次都從零開始，相當於 Day 1）"]
+    mem.state = st
+    loaded = mem.load(st.goal.goal_type)
+    ctx.scratch["lessons"] = ctx.scratch["hypothesis_lessons"] = mem.texts()
+    ctx.frontier.attach_memory(mem.prior if mem.use_m2 else None, mem.avoid if mem.use_m1 else None)
+    for lesson in loaded:
+        if not lesson.biases or any(b.type != "avoid_path" for b in lesson.biases):
+            mem.mark(st, lesson, "prompt")
+    lines = [f"記憶：M1 經驗庫{'啟用' if mem.use_m1 else '停用'}（載入 {len(loaded)} 條生效經驗）、"
+             f"M2 URL 價值先驗{'啟用' if mem.use_m2 else '停用'}"]
+    lines += [f"  {x.id} [{x.source}] {x.lesson}（{'；'.join(b.describe() for b in x.biases) or '僅文字'}）"
+              for x in loaded]
+    return lines
+
+
 def define_goal(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
     out, records, error = _call_llm(ctx, "planner", goal_prompt(st.task), GoalOut)
@@ -143,9 +162,10 @@ def define_goal(ctx: EpisodeContext) -> StepOutcome:
                f"焦點網域：{', '.join(goal.focus_domains)}"]
     details += [f"成功條件：{c}" for c in goal.success_criteria]
     details += [f"⚠ {n}" for n in notes]
+    details += memory_setup(ctx)
     return StepOutcome(summary=f"研究目標：{goal.restated_question}", details=details,
                        decision={"goal": goal.model_dump(mode="json"), "notes": notes}, llm=records,
-                       reason=error)
+                       reason=error, lessons_applied=sorted(st.lessons_applied))
 
 
 # ---------- PLAN_INFO_NEEDS ----------
@@ -189,6 +209,23 @@ def plan_info_needs(ctx: EpisodeContext) -> StepOutcome:
     lessons: list[str] = ctx.scratch.get("lessons", [])
     out, records, error = _call_llm(ctx, "planner", plan_prompt(st.task, st.goal, lessons), PlanOut)
     needs, notes = normalize_plan(out, st.task, st.goal)
+    applied = []
+    if ctx.memory is not None:   # M1 偏置：調整資訊需求優先序，缺少時補上
+        own, focus = st.task.own_site, st.goal.focus_domains
+        default_targets = {"control_check": [own], "rank_change": [own], "serp_competitors": st.task.competitors,
+                           "site_inventory": focus, "page_changes": focus}
+        for lesson, b in ctx.memory.biases("info_need_priority"):
+            need = next((n for n in needs if n.kind == b.kind), None)
+            if need is None:
+                needs.append(InfoNeed(id=f"N{len(needs) + 1}", kind=b.kind, question=f"依經驗 {lesson.id} 補上",
+                                      target_domains=default_targets[b.kind], answer_criteria="以量測資料回答",
+                                      priority=b.priority, must_answer=True, added_by="system"))
+                notes.append(f"依經驗 {lesson.id} 補上 {b.kind}（優先 {b.priority}）")
+            elif need.priority != b.priority:
+                notes.append(f"依經驗 {lesson.id} 把 {need.id} [{b.kind}] 優先序 {need.priority} → {b.priority}")
+                need.priority = b.priority
+            ctx.memory.mark(st, lesson, "plan")
+            applied.append(lesson.id)
     st.info_needs = needs
     details = [f"{n.id} [{n.kind}] 優先 {n.priority}{' 必答' if n.must_answer else ''}"
                f"{'（系統補上）' if n.added_by == 'system' else ''} {', '.join(n.target_domains)}：{n.question}"
@@ -198,7 +235,7 @@ def plan_info_needs(ctx: EpisodeContext) -> StepOutcome:
     details += [f"⚠ {n}" for n in notes]
     return StepOutcome(summary=f"規劃 {len(needs)} 項資訊需求", details=details,
                        decision={"info_needs": [n.model_dump(mode="json") for n in needs], "notes": notes},
-                       llm=records, reason=error)
+                       llm=records, reason=error, lessons_applied=applied)
 
 
 # ---------- SELECT_ACTION ----------
@@ -266,9 +303,22 @@ def select_action(ctx: EpisodeContext) -> StepOutcome:
                            decision={"phase": st.phase, "approval": st.approval_request}, reason=v.reason)
     st.pending = chosen
     ctx.scratch["no_candidates"] = chosen is None
+    if chosen is not None and ctx.memory is not None:
+        for lid in chosen.lessons:
+            lesson = next((x for x in ctx.memory.lessons if x.id == lid), None)
+            if lesson:
+                ctx.memory.mark(st, lesson, "sampling")
     details = []
+    focus_lesson = ctx.scratch.pop("focus_skip", None)
     if st.phase != previous:
         details.append(f"進入階段 {st.phase.value}（抓取額度上限 {ctx.ledger.fetch_cap(st.phase)}）")
+        if focus_lesson and previous in (Phase.DISCOVERY, Phase.SAMPLING):
+            details.append(f"依經驗 {focus_lesson}：有訊號的範本已有足夠證據候選，跳過其餘範本的普查")
+            lesson = next((x for x in ctx.memory.lessons if x.id == focus_lesson), None)
+            if lesson:
+                ctx.memory.mark(st, lesson, "skip_broad_sampling")
+                if chosen is not None and focus_lesson not in chosen.lessons:
+                    chosen.lessons.append(focus_lesson)
     if chosen:
         details += [f"理由：{chosen.reason}", f"評分 {chosen.score:.2f}：{_score_line(chosen.breakdown)}"]
         alts = [f"{a.label()}（{a.score:.2f}）" for a in cands[1:4] if a is not chosen]
@@ -281,6 +331,7 @@ def select_action(ctx: EpisodeContext) -> StepOutcome:
         decision={"phase": st.phase, "action": chosen.model_dump(mode="json") if chosen else None,
                   "n_candidates": len(cands), "rejected": rejected},
         reason=chosen.reason if chosen else None,
+        lessons_applied=list(chosen.lessons) if chosen else [],
         candidates=[{"action": a.label(), "tool": a.tool, "score": a.score, "breakdown": a.breakdown,
                      "reason": a.reason} for a in cands[:5]],
     )
@@ -447,6 +498,15 @@ def _parse_discover(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
     hot = sorted(rows, key=lambda r: (-r["recent_share"], -r["n_recent"]))[:3]
     summary = (f"{domain}：{added:,} 個 URL、{len(rows)} 個範本；期間內更新比例最高："
                + "、".join(f"{r['template']}（{r['n_recent']}/{r['n_urls']}）" for r in hot))
+    fr.reprime(domain, rows)   # 已知範本規模與更新爆發度：重新查詢經驗先驗
+    primed = [s for s in fr.stats([domain]) if s.prior_source]
+    if primed:
+        out.details.append(f"經驗先驗：{len(primed)} 個範本已套用 M2 先驗（例如 "
+                           + "、".join(f"{s.key.split('/', 1)[1]} {s.prior_mean:.2f}" for s in primed[:3]) + "）")
+    avoided = [s for s in fr.stats([domain]) if s.avoid_source]
+    if avoided:
+        out.details.append("依經驗避開：" + "、".join(f"{s.key.split('/', 1)[1]}（{s.avoid_source}）" for s in avoided))
+        out.lessons_applied += sorted({s.avoid_source for s in avoided})
     data = {"domain": domain, "n_urls": added, "templates": rows, "sitemaps": len(raw["sitemaps"]),
             "errors": raw["errors"], "excluded": dict(fr.excluded)}
     obs = st.add_observation("site_inventory", summary, data, need_id=st.pending.need_id)
@@ -589,6 +649,12 @@ def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
             "category": raw.category, "statement": raw.statement, "subject_site": raw.subject_site,
             "template": raw.template, "mechanism": raw.mechanism, "prediction": raw.prediction,
             "falsification": raw.falsification, "cited": raw.cited_observations, "prior": raw.prior}, st, known)
+        if ctx.memory is not None and not reason:   # M1 偏置：調整某類假設的先驗
+            for lesson, b in ctx.memory.biases("hypothesis_prior"):
+                if b.category == fields["category"]:
+                    fields["prior"] = beliefs.clamp_prior(fields["prior"] + b.delta)
+                    fields["note"] = f"依經驗 {lesson.id} 先驗 {b.delta:+.2f}"
+                    ctx.memory.mark(st, lesson, "hypothesis_prior")
         h = Hypothesis(id=f"H{len(st.hypotheses) + 1}", round=st.hypothesis_round, category=fields["category"],
                        statement=fields["statement"], subject_site=fields["subject_site"], template=fields["template"],
                        mechanism=fields["mechanism"], prediction=fields["prediction"],
@@ -622,15 +688,55 @@ def _catalog(kinds) -> dict:
             for k in kinds}
 
 
+def _evaluate_executed(ctx: EpisodeContext, details: list[str], final: bool = True) -> None:
+    """判定已執行完的探針，把結果寫成證據（並記錄信心曲線的點）。
+
+    final=False（SEEK 當下判定免費探針）：資料不足的探針保留到 REVISE 再判定，因為付費抽樣可能補齊資料（例如改版日期）。
+    """
+    st = ctx.state
+    for p in [p for p in st.probes if p.status == "executed"]:
+        drafts = probes.evaluate(ctx, p)
+        label = probes.CATALOG[p.kind].label
+        if not drafts and not final:
+            details.append(f"{p.id} [{label}]：目前資料不足，待其他探針完成後再判定")
+            continue
+        p.status = "evaluated"
+        if not drafts:
+            details.append(f"{p.id} [{label}]：資料不足或結果不具鑑別力，不計入證據" + (f"（{p.note}）" if p.note else ""))
+        for d in drafts:
+            if d.direction == "none":
+                details.append(f"{p.id} [{label}] → {d.hypothesis_id}：{d.note}")
+                continue
+            ev = EvidenceItem(id=f"EV-{len(st.evidence) + 1}", hypothesis_id=d.hypothesis_id, probe=p.kind,
+                              direction=d.direction, strength=d.strength, observation_ids=d.observation_ids,
+                              note=d.note, seq=st.seq + 1)
+            st.evidence.append(ev)
+            beliefs.record_point(st, st.hypothesis(ev.hypothesis_id), ev.id)
+            details.append(f"{ev.id} → {ev.hypothesis_id} {'支持' if ev.direction == 'for' else '反對'}"
+                           f"（{STRENGTH_ZH[ev.strength]}）[{label}]：{d.note}")
+
+
 def seek_evidence(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
     st.seek_rounds += 1
     testing = [h for h in st.hypotheses if h.status == "testing"]
-    planned, details, records, error = [], [], [], None
+    planned, details, records, error, applied = [], [], [], None, []
     for kind in probes.FREE:
         p = probes.plan(ctx, kind, testing, "system", "免費探針：只用既有觀察，一律執行")
         if p:
             planned.append(p)
+    _evaluate_executed(ctx, details, final=False)   # 免費證據立即判定：付費探針的規劃者因此能看到它們
+    skip = ctx.memory.biases("skip_costly_probes") if (ctx.memory and testing) else []
+    if skip:   # M1 偏置：免費證據已明確分出高下時，不再花預算
+        lesson, bias = skip[0]
+        post = sorted((beliefs.posterior(h.prior, st.evidence_for(h.id)), h.id) for h in testing)
+        top, others = post[-1], [p for p, _ in post[:-1]]
+        if top[0] >= bias.threshold and all(p <= beliefs.REFUTED_AT for p in others):
+            details.append(f"依經驗 {lesson.id}：免費證據已讓 {top[1]} 達 {top[0]:.2f}、其他 ≤ {beliefs.REFUTED_AT}，"
+                           f"跳過付費探針")
+            ctx.memory.mark(st, lesson, "seek")
+            applied.append(lesson.id)
+            testing = []
     if testing and ctx.ledger.fetch_room(Phase.VERIFICATION) > 0:
         budget = {"verification_fetches_left": ctx.ledger.fetch_room(Phase.VERIFICATION),
                   "api_calls_left": ctx.settings.budget.max_api_calls - st.budget.api_calls,
@@ -653,7 +759,7 @@ def seek_evidence(ctx: EpisodeContext) -> StepOutcome:
         details.append(f"{p.id} [{probes.CATALOG[p.kind].label}] → {', '.join(p.hypothesis_ids)}：{how}{why}")
     return StepOutcome(summary=f"規劃 {len(planned)} 個證據探針；證據佇列 {len(st.evidence_queue)} 個行動",
                        details=details, decision={"probes": [p.model_dump(mode="json") for p in planned]},
-                       llm=records, reason=error)
+                       llm=records, reason=error, lessons_applied=applied)
 
 
 # ---------- REVISE_BELIEFS ----------
@@ -719,23 +825,7 @@ def _red_team(ctx: EpisodeContext, h: Hypothesis) -> tuple[list[dict], list[str]
 def revise_beliefs(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
     details, records = [], []
-    for p in [p for p in st.probes if p.status == "executed"]:
-        drafts = probes.evaluate(ctx, p)
-        p.status = "evaluated"
-        label = probes.CATALOG[p.kind].label
-        if not drafts:
-            details.append(f"{p.id} [{label}]：資料不足或結果不具鑑別力，不計入證據" + (f"（{p.note}）" if p.note else ""))
-        for d in drafts:
-            if d.direction == "none":
-                details.append(f"{p.id} [{label}] → {d.hypothesis_id}：{d.note}")
-                continue
-            ev = EvidenceItem(id=f"EV-{len(st.evidence) + 1}", hypothesis_id=d.hypothesis_id, probe=p.kind,
-                              direction=d.direction, strength=d.strength, observation_ids=d.observation_ids,
-                              note=d.note, seq=st.seq + 1)
-            st.evidence.append(ev)
-            beliefs.record_point(st, st.hypothesis(ev.hypothesis_id), ev.id)
-            details.append(f"{ev.id} → {ev.hypothesis_id} {'支持' if ev.direction == 'for' else '反對'}"
-                           f"（{STRENGTH_ZH[ev.strength]}）[{label}]：{d.note}")
+    _evaluate_executed(ctx, details)
     details += beliefs.refresh(st)
     for h in [h for h in st.hypotheses if h.status == "testing" and not h.verified
               and h.posterior >= beliefs.VERIFY_AT][:MAX_VERIFY_PER_REVISE]:
@@ -854,7 +944,6 @@ def report(ctx: EpisodeContext) -> StepOutcome:
         "report": st.report, "info_needs": [n.model_dump(mode="json") for n in st.info_needs],
         "budget": b.model_dump(),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    st.status = "done"
     details = [f"{c.id} {c.subject_site}{c.template_prefix}：{', '.join(c.change_types)}，信心 {c.confidence:.2f}，"
                f"證據 {', '.join(c.evidence_ids)}{'' if c.validated else '（未通過驗證）'}" for c in claims]
     details += [f"{h.id} {STATUS_ZH[h.status]}（{h.posterior:.2f}）：{h.statement}" for h in st.hypotheses
@@ -868,7 +957,24 @@ def report(ctx: EpisodeContext) -> StepOutcome:
                        reason=error)
 
 
+# ---------- REFLECT ----------
+
+def reflect_step(ctx: EpisodeContext) -> StepOutcome:
+    from seo_intel.memory.reflect import reflect
+
+    st = ctx.state
+    if ctx.memory is None or ctx.memory.store is None:
+        st.status = "done"
+        return StepOutcome(summary="未啟用記憶：本次結果不寫入經驗（Day 1 模式）")
+    lines, summary = reflect(ctx)
+    st.reflection = {**summary, "lines": lines}
+    st.status = "done"
+    head = f"學習：{'成功' if summary['success'] else '未成功'}；生效經驗 {summary['active_lessons']} 條、候選 {summary['candidate_lessons']} 條"
+    return StepOutcome(summary=head, details=lines[1:], decision=summary, lessons_applied=sorted(st.lessons_applied))
+
+
 HANDLERS = {
+    "REFLECT": reflect_step,
     "DEFINE_GOAL": define_goal,
     "PLAN_INFO_NEEDS": plan_info_needs,
     "SELECT_ACTION": select_action,

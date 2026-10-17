@@ -103,30 +103,7 @@ CREATE TABLE IF NOT EXISTS claims (
     validated         INTEGER NOT NULL DEFAULT 0
 );
 
--- ========== 學習 ==========
-
-CREATE TABLE IF NOT EXISTS lessons (                       -- M1 經驗庫
-    id               TEXT PRIMARY KEY,
-    source           TEXT NOT NULL CHECK (source IN ('success', 'failure', 'human_correction')),
-    scope_json       TEXT NOT NULL,
-    trigger          TEXT NOT NULL,
-    lesson           TEXT NOT NULL,
-    biases_json      TEXT NOT NULL DEFAULT '[]',
-    status           TEXT NOT NULL CHECK (status IN ('candidate', 'active', 'retired')),
-    utility_json     TEXT NOT NULL DEFAULT '{}',
-    provenance_json  TEXT NOT NULL DEFAULT '{}',
-    created_at       TEXT NOT NULL,
-    updated_at       TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS template_stats (                -- M2 URL 價值學習
-    scope_key  TEXT NOT NULL,
-    template   TEXT NOT NULL,
-    alpha      REAL NOT NULL CHECK (alpha > 0),
-    beta       REAL NOT NULL CHECK (beta > 0),
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (scope_key, template)
-);
+-- 學習用的經驗與範本統計存在獨立的 memory.db（見 src/seo_intel/memory/schema.sql）
 
 -- ========== 自治邊界與回饋 ==========
 
@@ -156,4 +133,3 @@ CREATE INDEX IF NOT EXISTS idx_steps_episode ON steps(episode_id, seq);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_episode ON llm_calls(episode_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_episode ON tool_calls(episode_id);
 CREATE INDEX IF NOT EXISTS idx_observations_episode ON observations(episode_id);
-CREATE INDEX IF NOT EXISTS idx_lessons_status ON lessons(status);

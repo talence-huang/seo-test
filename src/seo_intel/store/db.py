@@ -11,7 +11,10 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+MIGRATIONS = {
+    2: "DROP INDEX IF EXISTS idx_lessons_status; DROP TABLE IF EXISTS lessons; DROP TABLE IF EXISTS template_stats;",
+}
 
 
 def utc_now() -> str:
@@ -43,9 +46,12 @@ class Database:
         if current > SCHEMA_VERSION:
             raise RuntimeError(f"資料庫版本 {current} 比程式支援的 {SCHEMA_VERSION} 新")
         if current < SCHEMA_VERSION:
-            sql = resources.files("seo_intel.store").joinpath("schema.sql").read_text(encoding="utf-8")
+            if current == 0:   # 新資料庫：直接建立最新 schema
+                script = resources.files("seo_intel.store").joinpath("schema.sql").read_text(encoding="utf-8")
+            else:              # 既有資料庫：依序套用遷移
+                script = "\n".join(MIGRATIONS[v] for v in range(current + 1, SCHEMA_VERSION + 1))
             with self.transaction():
-                self.conn.executescript(sql)
+                self.conn.executescript(script)
                 self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @contextmanager

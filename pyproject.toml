@@ -27,7 +27,7 @@ seo-intel = "seo_intel.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-seo_intel = ["store/*.sql"]
+seo_intel = ["store/*.sql", "memory/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

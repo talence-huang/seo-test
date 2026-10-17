@@ -94,10 +94,23 @@ class TemplateStat:
     alpha: float = 1.0
     beta: float = 1.0
     trap: str | None = None
+    burst: float | None = None          # 期間內更新比例 ÷ 全站平常比例（探勘後才知道）
+    prior_source: str | None = None     # M2 先驗來源（None＝無經驗，使用 Beta(1,1)）
+    prior_mean: float | None = None
+    prior_n: float = 0.0
+    avoid_source: str | None = None     # 套用的 M1 經驗 ID
 
     @property
     def value(self) -> float:
         return self.alpha / (self.alpha + self.beta)
+
+    def min_samples(self, default: int, avoid: float) -> int:
+        """確信是低價值的範本只抽 1 頁；被經驗標記要避開的範本不抽樣。"""
+        if avoid >= 1.0:
+            return 0
+        if self.prior_mean is not None and self.prior_mean < 0.15 and self.prior_n >= 6:
+            return 1
+        return default
 
 
 class Frontier:
@@ -113,9 +126,41 @@ class Frontier:
         self.entries: dict[str, Entry] = {}
         self.templates: dict[str, TemplateStat] = {}
         self.excluded: dict[str, int] = {}
-        self.template_prior: dict[str, float] = {}   # Phase 4：由學習機制提供
-        self.template_avoid: dict[str, float] = {}   # Phase 4：由學習機制提供
+        self.template_avoid: dict[str, float] = {}   # M1：經驗標記要避開的範本
+        self.prior_fn = None    # M2：(範本鍵, URL 數, 爆發度) → PriorInfo | None（不寫入檢查點）
+        self.avoid_fn = None    # M1：範本鍵 → (避開強度, 經驗) | None
         self._heaps: dict[str, list[tuple[float, int, str]]] = {}
+
+    # ---------- 記憶掛勾 ----------
+
+    def attach_memory(self, prior_fn, avoid_fn) -> None:
+        self.prior_fn, self.avoid_fn = prior_fn, avoid_fn
+        for stat in self.templates.values():
+            self._prime(stat)
+
+    def _prime(self, stat: TemplateStat) -> None:
+        if self.avoid_fn is not None:
+            hit = self.avoid_fn(stat.key)
+            if hit:
+                self.template_avoid[stat.key] = hit[0]
+                stat.avoid_source = hit[1].id
+        if self.prior_fn is None or stat.n_fetched:
+            return
+        info = self.prior_fn(stat.key, stat.n_urls, stat.burst)
+        if info is None:
+            return
+        stat.alpha, stat.beta = info.alpha0, info.beta0
+        stat.prior_source, stat.prior_mean, stat.prior_n = info.source, info.mean, info.n
+
+    def reprime(self, domain: str, rows: list[dict]) -> None:
+        """探勘後已知範本規模與更新爆發度：重新查詢先驗（只針對尚未抓取的範本）。"""
+        share = sum(r["n_recent"] for r in rows) / max(1, sum(r["n_urls"] for r in rows))
+        by_name = {r["template"]: r for r in rows}
+        for stat in self.stats([domain]):
+            row = by_name.get(stat.key.split("/", 1)[1])
+            if row and row["n_urls"]:
+                stat.burst = round(row["recent_share"] / max(share, 0.01), 2)
+            self._prime(stat)
 
     # ---------- 加入 ----------
 
@@ -145,7 +190,10 @@ class Frontier:
             entry = Entry(url=url, domain=domain, template=tkey, depth=urlsplit(url).path.count("/"),
                           relevance=self._relevance(url, anchor), lastmod=lastmod, sources=[source], anchor=anchor)
             self.entries[url] = entry
-            stat = self.templates.setdefault(tkey, TemplateStat(key=tkey, domain=domain, trap=detect_trap(tkey)))
+            stat = self.templates.get(tkey)
+            if stat is None:
+                stat = self.templates[tkey] = TemplateStat(key=tkey, domain=domain, trap=detect_trap(tkey))
+                self._prime(stat)
             stat.n_urls += 1
             stat.n_sitemap += source == "sitemap"
             stat.n_recent += self._in_window(lastmod)
@@ -188,7 +236,7 @@ class Frontier:
         return sum(parts.values()), parts
 
     def _dynamic(self, stat: TemplateStat, total_fetched: int) -> dict[str, float]:
-        value = self.template_prior.get(stat.key, stat.value) if stat.n_fetched == 0 else stat.value
+        value = stat.value   # 先驗已折算為 Beta 的虛擬觀察次數，本次實測會逐步蓋過它
         explore = min(1.0, math.sqrt(2 * math.log(total_fetched + 2) / (stat.n_fetched + 1))) / 2
         cost = (stat.n_blocked + stat.n_errors) / (stat.n_fetched + 1)
         return {
@@ -210,7 +258,8 @@ class Frontier:
         return None
 
     def best(self, k: int = 5, *, domains: list[str] | None = None, under_sampled: int | None = None,
-             exclude_traps: bool = False, templates: list[str] | None = None) -> list[tuple[Entry, float, dict[str, float]]]:
+             exclude_traps: bool = False, templates: list[str] | None = None,
+             only: set[str] | None = None, max_fetched: int | None = None) -> list[tuple[Entry, float, dict[str, float]]]:
         """回傳前 k 個候選與分數明細。一般情況每個範本最多一個（確保多樣性）；指定 templates 時取該範本的前 k 個。"""
         if templates is not None:
             return self._best_within(templates, k)
@@ -219,12 +268,17 @@ class Frontier:
         for tkey, stat in self.templates.items():
             if domains is not None and stat.domain not in domains:
                 continue
+            if only is not None and tkey not in only:
+                continue
             if exclude_traps and stat.trap:
                 continue
-            if under_sampled is not None and (
-                    stat.n_fetched >= min(under_sampled, stat.n_urls) or stat.n_blocked >= 2
-                    or (stat.n_sitemap == 0 and stat.n_urls < MIN_TEMPLATE_SIZE_FOR_SAMPLING)):
-                continue   # 抽樣只針對有規模的範本（首頁等單一頁面不算範本）
+            if max_fetched is not None and stat.n_fetched >= max_fetched:
+                continue   # 同一範本抓再多頁，資訊量遞減；避免單一範本吃掉預算
+            if under_sampled is not None:
+                need = stat.min_samples(under_sampled, self.template_avoid.get(tkey, 0.0))
+                if (stat.n_fetched >= min(need, stat.n_urls) or stat.n_blocked >= 2
+                        or (stat.n_sitemap == 0 and stat.n_urls < MIN_TEMPLATE_SIZE_FOR_SAMPLING)):
+                    continue   # 抽樣只針對有規模的範本（首頁等單一頁面不算範本）
             e = self._top_of(tkey)
             if e is None:
                 continue
@@ -298,7 +352,6 @@ class Frontier:
             "entries": [asdict(e) for e in self.entries.values()],
             "templates": [asdict(s) for s in self.templates.values()],
             "excluded": self.excluded,
-            "template_prior": self.template_prior,
             "template_avoid": self.template_avoid,
         }
 
@@ -306,8 +359,7 @@ class Frontier:
     def from_dict(cls, d: dict) -> Frontier:
         f = cls(d["keywords"], (date.fromisoformat(d["window"][0]), date.fromisoformat(d["window"][1])), d["targets"])
         f.excluded = d["excluded"]
-        f.template_prior = d["template_prior"]
-        f.template_avoid = d["template_avoid"]
+        f.template_avoid = d.get("template_avoid", {})
         f.templates = {s["key"]: TemplateStat(**s) for s in d["templates"]}
         f.entries = {e["url"]: Entry(**e) for e in d["entries"]}
         f.set_focus(d["focus"])

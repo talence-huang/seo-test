@@ -20,9 +20,9 @@
 
 | 需求 | 設計 | 模組 | 觀察 / 驗證 | 狀態 |
 |---|---|---|---|---|
-| 至少一個學習機制 | [05 §1–3](05-memory-and-evals.md)：M1、M2 | `memory/` | 單元測試 | ⬜ |
-| 調用過往成功 / 失敗 / 人工糾偏經驗 | M1 三種來源 | `memory/lessons.py`、`cli.py` | trace 的 `lessons_applied` | ⬜ |
-| 決策優於過去 | `biases`、M2 後驗 | `core/frontier.py` | 同情境兩次 trace 對照；消融 | ⬜ |
+| 至少一個學習機制 | [05 §1–3](05-memory-and-evals.md)：M1、M2 | `memory/` | `tests/test_memory.py`（15 個） | ✅ |
+| 調用過往成功 / 失敗 / 人工糾偏經驗 | M1 三種來源 | `memory/reflect.py`、`memory/correct.py`、`cli.py` | trace 的 `lessons_applied`、主控台「套用經驗」、timeline「記憶與學習」、`memory show` 稽核軌跡 | ✅ |
+| 決策優於過去 | `biases`、M2 先驗 | `core/frontier.py`、`core/actions.py`、`core/steps.py` | s1 連跑抓取 69 → 49 → 38；未參與訓練的 s5 68 → 38（[03 Phase 4](03-implementation-plan.md)）；消融開關 `--ablate` | 🔄 FakeLLM 已驗證；正式評測於 Phase 6 |
 | Evals：可執行的測試方法 | [05 §4](05-memory-and-evals.md) | `evals/` | `seo-intel eval run / train / compare` | ⬜ |
 | Evals：量化指標 | F1、首個關鍵證據抓取數、浪費率、成本、幻覺率、安全違規、糾偏遵循率 | `evals/scorer.py` | `evals/reports/` | ⬜ |
 | 證明比第 1 天更好 | Day 1 vs Day N（保留測試集）＋ 消融 | `evals/runner.py` | `docs/07-research-findings.md` | ⬜ |
@@ -31,7 +31,7 @@
 
 | 需求 | 設計 | 模組 | 觀察 / 驗證 | 狀態 |
 |---|---|---|---|---|
-| 失效模式：反爬、幻覺、Tool 崩潰、錯誤經驗 | [06 §1](06-reliability-and-autonomy.md) F1–F4 | `tools/http.py`、`core/claims.py`、`memory/governance.py` | 06 §3 測試矩陣 | 🔄 反爬（F1）、幻覺防護（F2：引用驗證、數字由程式算、紅隊）、工具崩潰（F3）已實作並測試；錯誤經驗（F4）於 Phase 4 |
+| 失效模式：反爬、幻覺、Tool 崩潰、錯誤經驗 | [06 §1](06-reliability-and-autonomy.md) F1–F4 | `tools/http.py`、`core/claims.py`、`memory/reflect.py`、`memory/correct.py` | 06 §3 測試矩陣 | 🔄 反爬（F1）、幻覺防護（F2：引用驗證、數字由程式算、紅隊）、工具崩潰（F3）、錯誤經驗（F4：衝突淘汰、人工糾偏回溯）已實作並測試 |
 | 其他失效模式 | F5–F7 | 各模組 | 同上 | ⬜ |
 | 可 100% 自主的動作 | [06 §2.2](06-reliability-and-autonomy.md) | `core/policy.py` | 測試矩陣 | ⬜ |
 | 高風險動作須暫停等待人工核准 | 同上「需核准」 | `core/policy.py`、`cli.py` | 暫停 → 核准 → 續跑測試；主控台顯示擋下理由 | ⬜ |
@@ -48,7 +48,7 @@ seo-intel trace html <episode_id>
 ```
 
 ```bash
-seo-intel feedback correct --episode <episode_id> --claim <claim_id> --verdict wrong --reason "..."
+seo-intel feedback correct <episode_id> --claim C1 --verdict wrong --reason "..."
 ```
 
 ```bash

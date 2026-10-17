@@ -54,6 +54,8 @@ class ConsoleObserver:
         self.console.print(f"[dim][{r.seq:>4}][/] [bold {color}]{r.step:<15}[/] {escape(r.summary)}")
         for d in r.details:
             self.console.print(f"       {escape(d)}", highlight=False)
+        if r.lessons_applied and r.step not in ("DEFINE_GOAL", "REFLECT"):
+            self.console.print(f"       [cyan]套用經驗 {escape('、'.join(r.lessons_applied))}[/]", highlight=False)
         for rec in r.llm:
             self.console.print(f"       [magenta]{escape(llm_line(rec))}[/]", highlight=False)
         if r.step == "SELECT_ACTION" and r.budget:

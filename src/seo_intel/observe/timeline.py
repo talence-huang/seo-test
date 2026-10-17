@@ -137,6 +137,15 @@ def _research_sections(state: dict) -> str:
             f"<th>強度</th><th>觀察</th><th>判定依據</th></tr>{ev_rows}</table></div>")
 
 
+def _prior_cell(s: dict) -> str:
+    bits = []
+    if s.get("prior_source"):
+        bits.append(f"先驗 {s['prior_mean']:.2f}（{s['prior_source']}，{s['prior_n']:.0f} 次）")
+    if s.get("avoid_source"):
+        bits.append(f"避開（{s['avoid_source']}）")
+    return _e("；".join(bits))
+
+
 def _step_row(r: StepRecord) -> str:
     color = _PHASE_COLOR.get(r.phase, "#888")
     inner = []
@@ -153,10 +162,24 @@ def _step_row(r: StepRecord) -> str:
         inner.append("<b>HTTP 請求</b><pre>" + _e("\n".join(
             f"{c['status'] or c['error']}  {c['url']}  (第 {c['attempt']} 次，等待 {c['waited_s']}s)" for c in r.tool_calls)) + "</pre>")
     body = "".join(inner)
-    summary = f'<span class="step">{_e(r.step)}</span> {_e(r.summary)}'
+    lessons = "".join(f' <span class="pill" style="background:#0e7490">{_e(x)}</span>' for x in r.lessons_applied)
+    summary = f'<span class="step">{_e(r.step)}</span> {_e(r.summary)}{lessons}'
     cell = f"<details><summary>{summary}</summary>{body}</details>" if body else summary
     return (f'<tr><td>{r.seq}</td><td><span class="pill" style="background:{color}">{_e(r.phase)}</span></td>'
             f'<td>{r.t:.0f}s</td><td>{cell}</td><td>{r.budget.get("fetches", "")}</td></tr>')
+
+
+def _memory_section(state: dict) -> str:
+    applied = state.get("lessons_applied") or {}
+    refl = state.get("reflection") or {}
+    if not applied and not refl:
+        return ""
+    rows = "".join(f"<tr><td>{_e(k)}</td><td>{_e('、'.join(v))}</td></tr>" for k, v in sorted(applied.items()))
+    table = (f"<table><tr><th>經驗</th><th>套用位置（prompt＝提供給規劃／假設；sampling＝抽樣順序；"
+             f"skip_broad_sampling＝跳過普查；avoid:範本＝避開）</th></tr>{rows}</table>") if rows else "<p>本次沒有套用經驗</p>"
+    lines = "".join(f"<li>{_e(x)}</li>" for x in refl.get("lines", []))
+    return (f"<h2>記憶與學習</h2><div class='wrap'>{table}</div>"
+            + (f"<h3>REFLECT：本次學到什麼</h3><ul>{lines}</ul>" if lines else ""))
 
 
 def render_timeline(records: list[StepRecord], state: dict, frontier: dict | None,
@@ -178,7 +201,7 @@ def render_timeline(records: list[StepRecord], state: dict, frontier: dict | Non
         tpl_rows = "".join(
             f"<tr><td>{_e(s['key'])}</td><td>{s['n_urls']:,}</td><td>{s['n_recent']:,}</td><td>{s['n_fetched']}</td>"
             f"<td>{s['n_evidence']}</td><td>{s['alpha'] / (s['alpha'] + s['beta']):.2f}</td><td>{s['n_blocked']}</td>"
-            f"<td>{_e(s['trap'] or '')}</td></tr>" for s in stats)
+            f"<td>{_e(s['trap'] or '')}</td><td>{_prior_cell(s)}</td></tr>" for s in stats)
     obs = "".join(f"<tr><td>{_e(o['id'])}</td><td><code>{_e(o['kind'])}</code></td><td>{_e(o['summary'])}</td></tr>"
                   for o in state.get("observations", []))
     env = ""
@@ -195,9 +218,10 @@ def render_timeline(records: list[StepRecord], state: dict, frontier: dict | Non
 關鍵字 {_e(', '.join(goal.get('topic_keywords', [])))}</div>
 <div class="cards">{''.join(f'<div class="card"><span>{_e(k)}</span><b>{_e(v)}</b></div>' for k, v in cards)}</div>
 {_research_sections(state)}
+{_memory_section(state)}
 <h2>資訊需求</h2><div class="wrap"><table><tr><th>ID</th><th>類型</th><th>優先</th><th>目標網域</th><th>問題</th><th>狀態</th><th>解答</th></tr>{needs}</table></div>
 <h2>抓取預算隨步驟累積（底色＝階段）</h2>{_budget_svg(records, cap)}
-<h2>範本統計（Frontier）{excluded}</h2><div class="wrap"><table><tr><th>範本</th><th>URL 數</th><th>期間內更新</th><th>已抓取</th><th>證據</th><th>證據率</th><th>封鎖</th><th>陷阱</th></tr>{tpl_rows}</table></div>
+<h2>範本統計（Frontier）{excluded}</h2><div class="wrap"><table><tr><th>範本</th><th>URL 數</th><th>期間內更新</th><th>已抓取</th><th>證據</th><th>證據率</th><th>封鎖</th><th>陷阱</th><th>記憶（M2 先驗／M1 避開）</th></tr>{tpl_rows}</table></div>
 <h2>觀察（{len(state.get('observations', []))}）</h2><div class="wrap"><table><tr><th>ID</th><th>類型</th><th>內容</th></tr>{obs}</table></div>
 {env}
 <h2>步驟時間軸（點選展開：理由、候選與分數明細、LLM 輸出、HTTP 請求）</h2>

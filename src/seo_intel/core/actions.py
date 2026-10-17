@@ -7,11 +7,12 @@ SELECT_ACTION 會把前幾名連同分數明細寫入 trace，讓人看得到「
 from __future__ import annotations
 
 from seo_intel.core.context import EpisodeContext
-from seo_intel.core.frontier import Entry
+from seo_intel.core.frontier import Entry, template_key
 from seo_intel.core.models import DISCOVERY_KINDS, Action, InfoNeed, Phase
 
 MIN_SAMPLES_PER_TEMPLATE = 3
 MAX_DIFFS_PER_TEMPLATE = 5
+MAX_FETCHES_PER_TEMPLATE = 15   # 定向抓取時單一範本的上限：之後的頁面多半只是重複同一種訊號
 COMPONENT_LABELS = {
     "priority": "優先序", "relevance": "相關", "template_value": "範本價值", "freshness": "新鮮度",
     "authority": "權威", "serp": "SERP", "focus": "焦點", "explore": "探索", "avoid": "避開",
@@ -67,7 +68,7 @@ def _discovery(ctx: EpisodeContext) -> list[Action]:
     return out
 
 
-def _fetch_reason(e: Entry, phase: Phase) -> str:
+def _fetch_reason(ctx: EpisodeContext, e: Entry, phase: Phase) -> str:
     bits = []
     if "serp" in e.sources:
         bits.append("出現在 SERP")
@@ -75,8 +76,22 @@ def _fetch_reason(e: Entry, phase: Phase) -> str:
         bits.append("網址與主題高度相關")
     if e.lastmod:
         bits.append(f"lastmod={e.lastmod}")
+    stat = ctx.frontier.templates[e.template]
+    if stat.prior_source:
+        bits.append(f"經驗先驗 {stat.prior_mean:.2f}（{stat.prior_source}，{stat.prior_n:.0f} 次觀察）")
     label = "抽樣範本" if phase == Phase.SAMPLING else "定向抓取"
     return f"{label} {e.template}：" + ("、".join(bits) or "範本探索")
+
+
+def signal_templates(ctx: EpisodeContext) -> set[str]:
+    """有訊號的範本：SERP 排名網址所屬、期間內更新爆發（≥ 2 倍）、或經驗先驗價值高。"""
+    fr = ctx.frontier
+    out: set[str] = set()
+    serp = [o for o in ctx.state.observations if o.kind == "serp_shift"]
+    if serp:
+        out |= {template_key(u) for urls in serp[-1].data["target_urls_after"].values() for u in urls}
+    out |= {s.key for s in fr.templates.values() if (s.burst or 0) >= 2.0 or (s.prior_mean or 0) >= 0.3}
+    return out
 
 
 def _fetching(ctx: EpisodeContext, phase: Phase) -> list[Action]:
@@ -87,10 +102,28 @@ def _fetching(ctx: EpisodeContext, phase: Phase) -> list[Action]:
     need_id = next(n.id for n in _open(ctx) if n.kind == "page_changes")
     out = []
     sampling = phase == Phase.SAMPLING
-    for e, score, parts in fr.best(k=6, domains=domains, under_sampled=MIN_SAMPLES_PER_TEMPLATE if sampling else None,
-                                   exclude_traps=sampling):
+    kwargs = {"k": 6, "domains": domains, "under_sampled": MIN_SAMPLES_PER_TEMPLATE if sampling else None,
+              "exclude_traps": sampling, "max_fetched": None if sampling else MAX_FETCHES_PER_TEMPLATE}
+    picked, lessons = [], []
+    focus = ctx.memory.biases("sampling_focus") if ctx.memory else []
+    if focus and sampling:   # M1 經驗：先抽樣有訊號的範本
+        signals = signal_templates(ctx)
+        picked = fr.best(**kwargs, only=signals) if signals else []
+        if picked:
+            lessons = [focus[0][0].id]
+    elif focus and focus_satisfied(ctx):
+        # 已依經驗跳過普查：定向抓取不再探索沒抽樣過的範本（否則探索加分會把預算花在被跳過的範本上）
+        known = signal_templates(ctx) | {k for k, s in fr.templates.items() if s.n_fetched > 0}
+        picked = fr.best(**kwargs, only=known) or [(None, 0.0, {})]
+        lessons = [focus[0][0].id]
+    for e, score, parts in picked or fr.best(**kwargs):
+        if e is None:
+            break
+        reason = _fetch_reason(ctx, e, phase)
+        if lessons:
+            reason = f"依經驗 {lessons[0]} " + ("先抽樣有訊號的範本；" if sampling else "只在已知範本內定向抓取；") + reason
         out.append(Action(tool="fetch", args={"url": e.url}, need_id=need_id, phase=phase, score=score,
-                          breakdown=parts, reason=_fetch_reason(e, phase)))
+                          breakdown=parts, reason=reason, lessons=lessons))
     if phase == Phase.TARGETED:
         for url, info in st.fetched.items():
             tkey = info.get("template")
@@ -114,11 +147,31 @@ def generate(ctx: EpisodeContext, phase: Phase) -> list[Action]:
     return sorted(unique.values(), key=lambda a: -a.score)
 
 
+FOCUS_EVIDENCE_TO_SKIP = 2
+
+
+def focus_satisfied(ctx: EpisodeContext) -> str | None:
+    """M1 經驗「先抽樣有訊號的範本」：有訊號的範本已有足夠證據候選時，跳過其餘範本的普查。
+
+    經驗必須改變「做多少」而不只是「先做什麼」才會帶來效率（Phase 4 的實測發現）。回傳經驗 ID。
+    """
+    focus = ctx.memory.biases("sampling_focus") if ctx.memory else []
+    if not focus:
+        return None
+    signals = signal_templates(ctx)
+    n = sum(1 for i in ctx.state.fetched.values() if i.get("evidence") and i.get("template") in signals)
+    return focus[0][0].id if n >= FOCUS_EVIDENCE_TO_SKIP else None
+
+
 def compute_phase(ctx: EpisodeContext) -> Phase:
     st, ledger = ctx.state, ctx.ledger
     if any(n.kind in DISCOVERY_KINDS for n in _open(ctx)) and generate(ctx, Phase.DISCOVERY):
         return Phase.DISCOVERY
     if page_change_domains(ctx):
+        skip_broad = focus_satisfied(ctx)
+        if skip_broad and ledger.fetch_room(Phase.TARGETED) > 0 and generate(ctx, Phase.TARGETED):
+            ctx.scratch["focus_skip"] = skip_broad
+            return Phase.TARGETED
         if ledger.fetch_room(Phase.SAMPLING) > 0 and generate(ctx, Phase.SAMPLING):
             return Phase.SAMPLING
         if ledger.fetch_room(Phase.TARGETED) > 0:

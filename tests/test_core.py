@@ -210,7 +210,7 @@ def test_episode_s1_finds_true_template_without_violations(settings, tmp_path):
     assert not any(sim.server.log.violations().values())
     assert len(read_trace(tmp_path / "trace.jsonl")) == st.seq
     steps = [r.step for r in read_trace(tmp_path / "trace.jsonl")]
-    assert steps[:3] == ["DEFINE_GOAL", "PLAN_INFO_NEEDS", "SELECT_ACTION"] and steps[-1] == "REPORT"
+    assert steps[:3] == ["DEFINE_GOAL", "PLAN_INFO_NEEDS", "SELECT_ACTION"] and steps[-2:] == ["REPORT", "REFLECT"]
 
 
 def test_rich_keyword_lists_do_not_dilute_topic_matching(settings, tmp_path):

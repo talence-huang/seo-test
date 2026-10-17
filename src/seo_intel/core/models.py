@@ -83,6 +83,7 @@ class Action(BaseModel):
     args: dict[str, Any]
     need_id: str | None = None
     probe_id: str | None = None     # 為了某個證據探針而執行的行動
+    lessons: list[str] = []         # 影響此行動選擇的經驗 ID
     phase: Phase
     score: float
     breakdown: dict[str, float] = {}
@@ -205,6 +206,8 @@ class EpisodeState(BaseModel):
     belief_history: list[dict[str, Any]] = []
     claims: list[Claim] = []
     report: dict[str, Any] | None = None
+    lessons_applied: dict[str, list[str]] = {}    # 經驗 ID → 被套用的位置
+    reflection: dict[str, Any] | None = None
     end_reason: str | None = None
     done_signatures: list[str] = []
     fetched: dict[str, dict[str, Any]] = {}       # url → 頁面摘要

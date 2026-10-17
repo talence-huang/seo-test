@@ -12,7 +12,8 @@ from pydantic import BaseModel
 
 from seo_intel.config import ModelsConfig
 from seo_intel.llm.fake import FakeLLM
-from seo_intel.llm.roles import GoalOut, HypothesesOut, PlanOut, ProbePlanOut, ReportOut, VerifierOut
+from seo_intel.llm.roles import (BiasOut, GoalOut, HypothesesOut, LessonOut, PlanOut, ProbePlanOut, ReportOut,
+                                 VerifierOut)
 
 _QUOTED = re.compile(r"「([^」]+)」")
 _TASK = re.compile(r"<task>\s*(\{.*?\})\s*</task>", re.DOTALL)
@@ -122,7 +123,40 @@ def _report(claims: list[dict], hypotheses: list[dict]) -> dict:
                      caveats=["此報告由確定性假規劃器產生"], recommendations=[]).model_dump()
 
 
+_PATH = re.compile(r"(/[a-z0-9][a-z0-9-]*/)")
+_DOMAIN = re.compile(r"([a-z0-9-]+\.sim)")
+_NOISE_WORDS = ("不要", "避開", "忽略", "雜訊", "噪音", "不是原因", "無關", "自動產生")
+_SITEWIDE_WORDS = ("全站", "演算法", "核心更新")
+
+
+def _bias(type_: str, **kw) -> dict:
+    base = {"type": type_, "path": "", "domain": "*", "kind": "", "priority": 0, "category": "", "delta": 0.0,
+            "threshold": 0.0, "reason": "human"}
+    return BiasOut(**{**base, **kw}).model_dump()
+
+
+def _reflection(user: str) -> dict:
+    """把人工糾偏的文字以關鍵字規則轉成經驗（真正的 LLM 會做語意理解；這裡只求確定、可測）。"""
+    m = re.search(r"<correction>\s*(.*?)\s*</correction>", user, re.DOTALL)
+    reason = m.group(1) if m else ""
+    verdict = re.search(r"<verdict>(\w+)</verdict>", user)
+    biases = []
+    if any(w in reason for w in _NOISE_WORDS):
+        domain = (_DOMAIN.search(reason) or [None, "*"])[1]
+        biases += [_bias("avoid_path", path=p, domain=domain) for p in dict.fromkeys(_PATH.findall(reason))]
+    if any(w in reason for w in _SITEWIDE_WORDS) or "對照" in reason:
+        biases.append(_bias("info_need_priority", kind="control_check", priority=1))
+    if any(w in reason for w in _SITEWIDE_WORDS):
+        biases.append(_bias("hypothesis_prior", category="sitewide_factor", delta=0.15))
+    if "新頁" in reason or "新增頁面" in reason:
+        biases.append(_bias("hypothesis_prior", category="competitor_new_pages", delta=0.1))
+    return LessonOut(trigger="研究同類型的排名或競品問題時",
+                     lesson=f"人工糾偏（{verdict.group(1) if verdict else '—'}）：{reason}", biases=biases).model_dump()
+
+
 def _responder(system: str, user: str, schema: type[BaseModel]) -> dict:
+    if schema is LessonOut:
+        return _reflection(user)
     if schema is VerifierOut:
         return VerifierOut(assessment="holds", objections=[], requested_probes=[], summary="未發現可引用觀察支持的反駁（FakeLLM）。").model_dump()
     if schema is ProbePlanOut:

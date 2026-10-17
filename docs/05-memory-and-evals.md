@@ -9,81 +9,85 @@
 
 | 機制 | 學什麼 | 經驗來源 | 改變哪個決策 | 借用的 Hermes 概念 |
 |---|---|---|---|---|
-| **M1 經驗庫** | 「在什麼情境下該做 / 不該做什麼」 | 成功、失敗、**人工糾偏** | Planner prompt ＋ 程式可套用的偏置 | Skills、Background Review、Curator |
-| **M2 URL 價值學習** | 哪些 URL 範本常產出關鍵證據 | 每次 episode 的證據引用結果 | Frontier 評分的 `V̂(template)` | —（自建） |
+| **M1 經驗庫** | 「在什麼情境下該做 / 不該做什麼」 | 成功、失敗、**人工糾偏** | 程式直接套用的偏置（抽樣範圍、避開路徑、需求優先序、假設先驗、是否做付費探針）＋ prompt 文字 | Skills、Background Review、Curator |
+| **M2 URL 價值學習** | 哪些 URL 範本常是答案所在 | 成功 episode 的命中 / 未命中 | Frontier 範本價值的先驗、最少抽樣數 | —（自建） |
+
+兩者存在獨立的 `data/memory.db`（`memory/schema.sql`），與研究紀錄 `intel.db` 分開：記憶可以單獨快照、替換、清空，評測時切換 Day 1 / Day N 只需換檔案。
 
 ---
 
 ## 2. M1 經驗庫
 
-### 2.1 結構
+### 2.1 結構（實際資料）
 
 ```json
 {
-  "id": "L-0042",
-  "source": "human_correction",
-  "scope": {"goal_type": "ranking_drop_cause", "site_archetype": "content_publisher"},
-  "trigger": "調查排名下滑時",
-  "lesson": "先檢查非重疊查詢（對照組）再歸因於競品；上次把全站性下滑誤判為競品位移。",
-  "biases": [
-    {"type": "info_need_priority", "target": "control_group_check", "delta": 0.3},
-    {"type": "avoid_pattern", "domain": "competitor-b.sim", "pattern": "/search?q=*"}
-  ],
-  "evidence_episodes": ["E-0007"],
+  "id": "L-1",
+  "signature": "avoid_path|*|/reviews/|waf",
+  "source": "failure",
+  "scope": {"goal_type": "*"},
+  "trigger": "抓取 /reviews/ 開頭的網址時",
+  "lesson": "/reviews/ 開頭的頁面會被網站防火牆封鎖（summitgear.sim 回應 403），應直接避開，改用其他範本或歷史快照。",
+  "biases": [{"type": "avoid_path", "path": "/reviews/", "domain": "*", "reason": "waf"}],
   "status": "active",
-  "utility": {"times_applied": 5, "mean_reward_delta": 0.21}
+  "support": 2, "applied": 1, "applied_success": 1, "conflicts": 0,
+  "provenance": {"episodes": ["E-…-s5-…", "E-…-s5-…"]}
 }
 ```
 
-`biases` 是關鍵：經驗會**直接改變程式行為**（提高某資訊需求的優先序、避開某路徑），即使 LLM 忽略了文字提示，決策仍會改變。
+`biases` 是關鍵：經驗會**直接改變程式行為**，即使 LLM 忽略了文字提示，決策仍會改變；所以進步可以用確定性指標量化。偏置只能用固定詞彙，由 Pydantic 驗證（`memory/models.py`），LLM 產生的偏置不合規就被丟棄：
 
-| `biases.type` | 作用位置 |
-|---|---|
-| `info_need_priority` | `PLAN_INFO_NEEDS` 後的需求排序 |
-| `avoid_pattern` | Frontier 的 `Avoid(u)`（工具失敗、封鎖、陷阱經驗都用這個） |
-| `prefer_tool` | `SELECT_ACTION` 對同一資訊需求的工具選擇 |
-
-### 2.2 三種來源
-
-| 來源 | 產生時機 | 初始狀態 |
+| `biases.type` | 作用位置 | 實際效果 |
 |---|---|---|
-| `success` | `REFLECT`：回溯哪些決策促成了被驗證的主張 | `candidate` |
-| `failure` | `REFLECT`：被推翻的假設、浪費的抓取、被封鎖的路徑 | `candidate` |
-| `human_correction` | 使用者執行 `seo-intel feedback correct` | **`active`**（立即生效、最高權重） |
+| `avoid_path` | Frontier | 該路徑的範本最少抽樣數歸零、評分扣 0.5；trace 顯示「依經驗避開」 |
+| `sampling_focus` | `SELECT_ACTION`（抽樣、定向） | 只抽樣有訊號的範本（SERP 排名網址所屬、期間內更新爆發 ≥ 2 倍、M2 先驗 ≥ 0.3）；訊號範本已有 ≥ 2 個證據候選時**跳過其餘範本的普查**；跳過後定向抓取不再探索沒抽樣過的範本 |
+| `info_need_priority` | `PLAN_INFO_NEEDS` 之後 | 調整某類資訊需求的優先序，缺少時補上 |
+| `hypothesis_prior` | `FORM_HYPOTHESES` 之後 | 某類假設的先驗 ±0.2 以內 |
+| `skip_costly_probes` | `SEEK_EVIDENCE` | 免費證據已讓主要假設 ≥ 門檻、其他 ≤ 0.2 時，不規劃付費探針 |
+
+### 2.2 三種來源（`memory/reflect.py`、`memory/correct.py`）
+
+| 來源 | 產生規則（確定性） | 初始狀態 |
+|---|---|---|
+| `failure` | 某範本抓到的頁面全部被 403 → `avoid_path`（waf）；全部是 JS 空殼頁 → `avoid_path`（js_shell） | `candidate` |
+| `success` | 成立主張的範本全都屬於「訊號範本」→ `sampling_focus`；**反事實檢查**：只用免費證據算出的後驗就已得到相同判定 → `skip_costly_probes` | `candidate` |
+| `human_correction` | `seo-intel feedback correct`：理由交給 reflector 角色轉成固定詞彙的偏置（FakeLLM 以關鍵字規則替代） | **`active`**（立即生效） |
 
 ```bash
-seo-intel feedback correct --episode E-0007 --claim C-3 --verdict wrong --reason "對照組也下滑，是全站性因素"
+seo-intel feedback correct <episode_id> --claim C1 --verdict wrong --reason "shieldguide.sim 的 /guide/ 只是例行更新，不是原因，應忽略"
 ```
 
-### 2.3 檢索與套用
+自動經驗刻意用規則萃取而不是讓 LLM 自由「反思」：規則產生的經驗可重現、可測試，也不會把爬取頁面的文字帶進記憶（注入防護）。
 
-1. `DEFINE_GOAL` 時依 `scope` 篩選，再以文字相似度取前 5 筆。
-2. 文字注入 Planner / Hypothesizer prompt 的「過往經驗」區塊（放在快取斷點之後）。
-3. `biases` 由程式直接套用。
-4. trace 記錄 `lessons_applied`，主控台與 timeline 都會顯示。
+### 2.3 套用與可觀察性
+
+1. `DEFINE_GOAL` 時載入與目標類型相符的 `active` 經驗，在主控台列出每條經驗與其偏置。
+2. 經驗文字放進 Planner / Hypothesizer prompt 的 `<lessons_from_past_episodes>`；偏置由程式套用。
+3. 每次套用都記錄在 `EpisodeState.lessons_applied`（經驗 ID → 套用位置，例如 `sampling`、`skip_broad_sampling`、`avoid:wildcart.sim/reviews/{slug}`、`seek`、`prompt`）。
+4. 主控台在該步驟顯示「套用經驗 L-x」；候選行動的理由寫出「依經驗 L-1 先抽樣有訊號的範本」；`timeline.html` 有「記憶與學習」區段（套用位置、REFLECT 學到什麼）與範本表的「記憶」欄（M2 先驗來源與觀察數、M1 避開）。
 
 ### 2.4 經驗治理（防止學到錯誤經驗）
 
 ```
-candidate ──(≥ 2 個 episode 支持)──► active ──(效用連續 3 次為負，或與人工糾偏衝突)──► retired
+candidate ──(2 個不同 episode 支持)──► active ──(與證據衝突 ≥ 2 次，或套用 ≥ 3 次且成功率 < 50%)──► retired
+human_correction ──► active（Agent 不會自行淘汰；與證據衝突時標記「建議人工檢視」；只能由人 memory retire）
 ```
 
-- **效用**：經驗被套用時，比較該 episode 獎勵與同情境基準，累計 `mean_reward_delta`。
-- **範圍**：經驗一定帶 `scope`，避免過度套用。
-- **快照**：每次 `REFLECT` 前快照記憶，可回滾；評測時也靠快照切換 Day 1 / Day N。
-- **注入防護**：經驗只能來自 Agent 自身的結構化反思或人工指令，不得直接引用爬取頁面的文字。
+- **成功**：`hypothesis_supported` 且所有主張的引用驗證通過。M2 只從成功的 episode 學。
+- **衝突**：`avoid_path` 要求避開的路徑，正是成立主張的範本（經驗與客觀證據直接矛盾）。
+- **人工糾偏判定 `wrong` 時的回溯**：撤回該 episode 給主張範本的 M2 命中（`reward_log` 記錄到範本層級，可精確撤銷、不會重複扣）；該 episode 套用過的經驗成功次數 −1（可能觸發淘汰）；從該 episode 萃取的 `success` 經驗撤回支持（支持數 < 2 退回候選，歸零則淘汰）。`partial` 撤回一半命中；`correct` 只記錄。
+- **稽核軌跡**：所有狀態變更寫入 `lesson_events`（建立、支持、生效、套用、衝突、糾偏、淘汰），`seo-intel memory show L-x` 可逐筆查看。
+- **快照**：`seo-intel memory snapshot <檔案>`（SQLite backup），評測前凍結記憶、或回溯錯誤學習時使用。
 
 ---
 
-## 3. M2 URL 價值學習
+## 3. M2 URL 價值學習（`memory/priors.py`）
 
-- **獎勵**：抓取的頁面產生的觀察，最終被已驗證的主張引用 → r = 1；否則 r = 0。
-- **模型**：每個 `(網站, 範本)` 與跨站的 `(範本原型, 目標類型)` 各維護 `Beta(α, β)`；episode 結束時 `α += 被引用頁數`、`β += 未被引用頁數`。
-- **使用**：評分取後驗平均 `α/(α+β)`；探索加分 `c·sqrt(ln N / n_template)`。
-- **同站第 2 次**：直接用該站後驗；**新網站**：用範本原型先驗（跨站遷移）。
+- **獎勵**：成功 episode 中，抓取的競品頁（200 或 403）若屬於成立主張的範本、且是期間內的新頁 / 變動頁 → 命中；否則未命中。未成功的 episode 不更新（不知道哪個範本才是答案，學了只會學到雜訊）。
+- **三層鍵，由具體到一般**：同網站範本（`目標類型|網域/範本`）→ 同類路徑（`目標類型|guide/{slug}`）→ 範本特徵（`目標類型|規模|更新爆發度`）。查詢時取第一個累積 ≥ 4 次觀察的層級；最後一層讓經驗能遷移到沒見過的網站。
+- **先驗強度上限**：`Beta(1 + 平均·k, 1 + (1 − 平均)·k)`，`k = min(8, 觀察數)`，避免過去的經驗壓過本次的實測。
+- **使用**：Frontier 範本價值以先驗起算；先驗價值 < 0.15 且觀察 ≥ 6 次的範本只抽 1 頁（原本 3 頁）。探勘後知道範本規模與更新爆發度，會對尚未抓取的範本重新查詢先驗。
 - 完全確定性、可離線測試，是最容易重現的進步證據。
-
----
 
 ## 4. Evals：證明「現在比第 1 天更好」
 
