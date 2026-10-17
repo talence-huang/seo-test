@@ -25,15 +25,47 @@
     <div class="layout">
       <form id="research-form" class="card form">
         <h2>開始一次研究</h2>
-        <label>情境
-          <select name="scenario" id="scenario"></select>
-        </label>
-        <p class="hint" id="scenario-desc"></p>
+        <div class="segmented" role="radiogroup">
+          <label><input type="radio" name="mode" value="real" checked> 真實網站</label>
+          <label><input type="radio" name="mode" value="sim"> 模擬情境（有標準答案）</label>
+        </div>
+        <div id="real-fields">
+          <label>競品網址（每行一個）
+            <textarea name="competitors" rows="2" placeholder="https://example.com"></textarea>
+          </label>
+          <label>關鍵字（每行一個）
+            <textarea name="keywords" rows="2" placeholder="高山茶&#10;烏龍茶"></textarea>
+          </label>
+          <label>自家網址（選填）
+            <input name="own_site" placeholder="https://your-site.com">
+          </label>
+          <div class="two">
+            <label>研究期間開始 <input type="date" name="start"></label>
+            <label>結束 <input type="date" name="end"></label>
+          </div>
+          <label>排名資料來源
+            <select name="serp_source" id="serp-source">
+              <option value="none">不使用（只分析競品網站本身）</option>
+              <option value="serpapi">SerpApi（Google 台灣的真實搜尋結果，按次計費）</option>
+              <option value="csv">上傳排名 CSV（從 Semrush、Ahrefs、Search Console 匯出）</option>
+            </select>
+          </label>
+          <input type="file" id="serp-csv" accept=".csv,text/csv" hidden>
+          <p class="hint" id="serp-hint"></p>
+          <p class="hint">Agent 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔，並用 Wayback Machine 比對頁面歷史版本。沒有排名歷史，所以研究的是「競品在這些關鍵字做了什麼內容策略」。開始前會請求一次首頁以確認正式網域。</p>
+        </div>
+        <div id="sim-fields" hidden>
+          <label>情境
+            <select name="scenario" id="scenario"></select>
+          </label>
+          <p class="hint" id="scenario-desc"></p>
+        </div>
         <fieldset>
           <legend>LLM</legend>
           <label class="inline"><input type="radio" name="llm" value="fake" checked> 假 LLM（免費、可重現）</label>
           <label class="inline"><input type="radio" name="llm" value="live" id="llm-live"> 真實 Opus（每次約 US$0.3）</label>
           <p class="hint" id="key-hint"></p>
+          <p class="hint" id="llm-real-hint" hidden>真實網站建議使用真實 Opus：假 LLM 只是測試用的規則式替身，只會從排名網址或已確認的變動範本提出假設，常常得不出結論。</p>
         </fieldset>
         <fieldset>
           <legend>記憶</legend>
@@ -48,10 +80,10 @@
         </fieldset>
         <details>
           <summary>進階：預算與世界種子</summary>
-          <label>抓取上限 <input type="number" name="max_fetches" min="5" placeholder="預設 300"></label>
+          <label>抓取上限 <input type="number" name="max_fetches" id="max-fetches" min="5" placeholder="預設 300"></label>
           <label>LLM 花費上限（US$） <input type="number" name="max_llm_usd" step="0.01" min="0.01" placeholder="預設 2.00"></label>
-          <label>世界種子 <input type="number" name="seed" placeholder="預設為情境的種子"></label>
-          <p class="hint">把抓取上限壓低（例如 30），就能看到 Agent 預算用盡時停下來請你核准。</p>
+          <label id="seed-label" hidden>世界種子 <input type="number" name="seed" placeholder="預設為情境的種子"></label>
+          <p class="hint">預算用盡但還有驗證工作時，Agent 會停下來請你核准延長。真實網站每次抓取間隔 2 秒，80 次約 3 分鐘。</p>
         </details>
         <label class="inline"><input type="checkbox" name="step" id="step-mode"> 逐步模式（每一步都停下來，由你按「下一步」）</label>
         <button type="submit" class="primary" id="start-btn">開始研究</button>

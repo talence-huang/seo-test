@@ -408,10 +408,15 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
             mem.store.close()
     console.rule("[bold]結果")
     env = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
-    viol = env["violations"]
     console.print(f"狀態 [bold]{st.status}[/]（{st.end_reason or ('已暫停' if loop.paused else '—')}）")
-    console.print(f"環境判定違規：{'[green]0[/]' if not any(viol.values()) else f'[red]{viol}[/]'}"
-                  f"（SimWeb 伺服器紀錄，本次執行期間）")
+    if "violations" in env:
+        viol = env["violations"]
+        console.print(f"環境判定違規：{'[green]0[/]' if not any(viol.values()) else f'[red]{viol}[/]'}"
+                      f"（SimWeb 伺服器紀錄，本次執行期間）")
+    else:
+        console.print(f"請求：{env['requests_by_host']}（{escape(env['note'])}）", highlight=False)
+    if st.report and st.report.get("headline"):
+        console.print(f"[bold]結論[/]：{escape(st.report['headline'])}")
     console.print(f"時間軸：{run_dir / 'timeline.html'}")
     console.print(f"trace：{run_dir / 'trace.jsonl'}")
     if loop.paused or st.status == "running":
@@ -427,16 +432,9 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
 
 
 def _write_artifacts(ectx, sim) -> None:
-    from seo_intel.observe.timeline import render_timeline
-    from seo_intel.observe.trace import read_trace
+    from seo_intel.core.runner import write_artifacts
 
-    run_dir = ectx.run_dir
-    log = sim.server.log
-    env = {"violations": log.violations(), "flags": dict(log.flag_counts()), "requests_by_host": dict(log.by_host())}
-    (run_dir / "environment.json").write_text(json.dumps(env, ensure_ascii=False, indent=2), encoding="utf-8")
-    html = render_timeline(read_trace(run_dir / "trace.jsonl"), ectx.state.model_dump(mode="json"),
-                           ectx.frontier.to_dict() if ectx.frontier else None, env)
-    (run_dir / "timeline.html").write_text(html, encoding="utf-8")
+    write_artifacts(ectx, sim)
 
 
 @research_app.callback(invoke_without_command=True)
@@ -455,12 +453,24 @@ def research(
     max_fetches: MaxFetchesOpt = None,
     max_llm_usd: MaxLlmOpt = None,
     seed: Annotated[int | None, typer.Option("--seed", help="SimWeb 世界種子（同樣的因果結構、不同的網址與雜訊）")] = None,
+    site: Annotated[list[str] | None, typer.Option("--site", help="真實網站：競品網址（可重複）")] = None,
+    keyword: Annotated[list[str] | None, typer.Option("--keyword", "-k", help="真實網站：關鍵字（可重複）")] = None,
+    own_site: Annotated[str | None, typer.Option("--own-site", help="真實網站：自家網址（選填）")] = None,
+    start: Annotated[str | None, typer.Option("--start", help="真實網站：研究期間開始（YYYY-MM-DD，預設 90 天前）")] = None,
+    end: Annotated[str | None, typer.Option("--end", help="真實網站：研究期間結束（預設今天）")] = None,
+    serp: Annotated[str, typer.Option("--serp", help="真實網站的排名資料：none｜serpapi（需 SERPAPI_API_KEY）｜csv")] = "none",
+    serp_csv: Annotated[Path | None, typer.Option("--serp-csv", help="--serp csv 時的排名 CSV（關鍵字、排名、網址）")] = None,
 ) -> None:
-    """在 SimWeb 情境中執行一個研究 episode。"""
+    """執行一個研究 episode：SimWeb 情境（--scenario）或真實網站（--site 與 --keyword）。"""
     if typer_ctx.invoked_subcommand:
         return
+    if site:
+        return _research_real(site, keyword or [], own_site, start, end, serp, serp_csv, llm=llm, step=step,
+                              quiet=quiet, verbose=verbose, path=path, memory=None if no_memory else (memory or _default_memory()),
+                              ablate=ablate, budget={"max_fetches": max_fetches, "max_llm_usd": max_llm_usd})
     if scenario is None:
-        console.print("請指定 --scenario（例如 --scenario s1），或使用 seo-intel research resume <episode>")
+        console.print("請指定 --scenario（例如 --scenario s1）、真實網站（--site 與 --keyword），"
+                      "或使用 seo-intel research resume <episode>")
         raise typer.Exit(1)
     from seo_intel.core.episode import RUNS_DIR, build_context, new_state
     from seo_intel.core.runner import apply_run_config, scenario_task
@@ -479,6 +489,28 @@ def research(
     _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
 
 
+def _research_real(sites, keywords, own_site, start, end, serp, serp_csv, *, llm, step, quiet, verbose, path, memory,
+                   ablate, budget) -> None:
+    from seo_intel.core.runner import apply_run_config, prepare_real
+
+    flags = sorted({x.strip().upper() for x in ablate.split(",") if x.strip()})
+    run_cfg = {"memory": {"path": str(memory) if memory else None, "ablate": flags},
+               "budget": {k: v for k, v in budget.items() if v is not None}}
+    settings, mem = apply_run_config(get_settings(), run_cfg)
+    params = {"competitors": sites, "keywords": keywords, "own_site": own_site, "start": start, "end": end,
+              "serp_source": serp, "csv_path": str(serp_csv.resolve()) if serp_csv else None}
+    console.print("真實網站研究：只抓公開頁面、遵守 robots.txt 與抓取間隔；開始前會請求一次首頁以確認正式網域。")
+    try:
+        ectx = prepare_real(params, settings, lambda run_dir: _make_llm(llm, settings, run_dir, None), memory=mem,
+                            run_cfg=run_cfg)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        if mem:
+            mem.store.close()
+        raise typer.Exit(1) from None
+    _execute(ectx, None, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
+
+
 @research_app.command("resume")
 def research_resume(
     episode_id: Annotated[str, typer.Argument(help="Episode ID")],
@@ -490,23 +522,20 @@ def research_resume(
 ) -> None:
     """從檢查點續跑：手動暫停、程序中斷，或人工核准 / 拒絕之後。"""
     from seo_intel.core import approvals
-    from seo_intel.core.episode import RUNS_DIR, build_context, load_checkpoint
-    from seo_intel.core.runner import apply_run_config, load_run_config
+    from seo_intel.core.episode import RUNS_DIR, load_checkpoint
+    from seo_intel.core.runner import apply_run_config, load_run_config, resume_context
     from seo_intel.observe.trace import truncate_trace
-    from simweb import VirtualClock, build
 
     run_dir = RUNS_DIR / episode_id
     if not (run_dir / "checkpoint.json").is_file():
         console.print(f"[red]找不到檢查點[/]：{run_dir}")
         raise typer.Exit(1)
-    state, frontier = load_checkpoint(run_dir)
+    state, _ = load_checkpoint(run_dir)
     if state.status in ("done", "failed"):
         console.print(f"Episode 已結束（{state.status}），無需續跑")
         raise typer.Exit(0)
     settings, mem = apply_run_config(get_settings(), load_run_config(run_dir))
-    sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at), seed=state.world_seed)
-    ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, None), sim.client(), sim.clock, run_dir,
-                         frontier, memory=mem)
+    ectx, sim = resume_context(run_dir, settings, lambda d: _make_llm(llm, settings, d, None), mem)
     try:
         notes = approvals.resume(ectx)
     except approvals.ApprovalPending as e:
@@ -514,7 +543,7 @@ def research_resume(
         if mem:
             mem.store.close()
         raise typer.Exit(1) from None
-    truncate_trace(run_dir / "trace.jsonl", state.seq)
+    truncate_trace(run_dir / "trace.jsonl", ectx.state.seq)
     _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=True, notes=notes)
 
 

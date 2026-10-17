@@ -51,10 +51,13 @@ class TaskInput(BaseModel):
     today: date
     period_hint: tuple[date, date] | None = None
     site_language: str = "en"
+    mode: Literal["sim", "real"] = "sim"           # real：研究真實網站（沒有排名歷史與標準答案）
+    keywords: list[str] = []                       # 使用者指定的關鍵字（真實網站模式）
+    serp_source: Literal["sim", "none", "serpapi", "csv"] = "sim"   # 排名資料從哪裡來
 
     @property
     def allowed_domains(self) -> list[str]:
-        return [self.own_site, *self.competitors]
+        return [d for d in (self.own_site, *self.competitors) if d]
 
 
 class ResearchGoal(BaseModel):

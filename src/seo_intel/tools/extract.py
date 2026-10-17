@@ -10,8 +10,10 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
 _WORD = re.compile(r"[A-Za-z0-9']+")
+_CJK_CHAR = re.compile(r"[㐀-䶿一-鿿豈-﫿]")   # 中文以字計（台灣慣用的「字數」）
 _INJECTION = re.compile(
-    r"ignore (all )?(previous|prior) instructions|system notice to ai|you must fetch|disregard your instructions",
+    r"ignore (all )?(previous|prior) instructions|system notice to ai|you must fetch|disregard your instructions"
+    r"|忽略(所有|以上|之前|先前)?的?(指示|指令)|給\s*AI\s*的(系統)?(通知|指示)|你必須(立即|馬上)?(抓取|存取|前往|回報)",
     re.IGNORECASE,
 )
 REDACTED = "[已移除：疑似指令文字]"
@@ -163,6 +165,15 @@ class _Parser(HTMLParser):
             self.visible.append(data)
 
 
+def _ld_nodes(ld) -> list[dict]:
+    """JSON-LD 可能是物件、陣列，或帶 @graph 的物件：攤平成節點清單。"""
+    if isinstance(ld, list):
+        return [n for x in ld for n in _ld_nodes(x)]
+    if not isinstance(ld, dict):
+        return []
+    return [ld, *[n for x in ld.get("@graph") or [] for n in _ld_nodes(x)]]
+
+
 def extract(html: str, url: str) -> PageFeatures:
     p = _Parser()
     try:
@@ -172,21 +183,28 @@ def extract(html: str, url: str) -> PageFeatures:
         pass
     schema: list[str] = []
     faq_entities = 0
+    ld_dates: dict[str, str] = {}
     for raw in p.ldjson:
         try:
             ld = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        t = ld.get("@type")
-        schema += t if isinstance(t, list) else [t] if t else []
-        faq_entities = max(faq_entities, len(ld.get("mainEntity") or []))
+        for node in _ld_nodes(ld):   # 真實網站常是陣列或 @graph（例如 WordPress 的 Yoast）
+            t = node.get("@type")
+            schema += [x for x in (t if isinstance(t, list) else [t]) if isinstance(x, str)]
+            if "FAQPage" in (t if isinstance(t, list) else [t]):
+                faq_entities = max(faq_entities, len(node.get("mainEntity") or []))
+            for key in ("datePublished", "dateModified"):
+                if isinstance(node.get(key), str):
+                    ld_dates.setdefault(key, node[key])
     host = urlsplit(url).hostname
     links = []
     for href, anchor in p.links:
         absolute = urljoin(url, href)
         if urlsplit(absolute).hostname == host:
             links.append((absolute.split("#")[0], anchor))
-    words = len(_WORD.findall(" ".join(p.visible)))
+    visible = " ".join(p.visible)
+    words = len(_WORD.findall(visible)) + len(_CJK_CHAR.findall(visible))
     return PageFeatures(
         url=url,
         title=(p.f_title[0] if p.f_title else ""),
@@ -196,8 +214,9 @@ def extract(html: str, url: str) -> PageFeatures:
         schema_types=sorted(set(schema)),
         faq_count=faq_entities or p.faq_h3,
         has_table=p.has_table,
-        published=p.meta.get("article:published_time"),
-        modified=p.meta.get("article:modified_time"),
+        published=p.meta.get("article:published_time") or ld_dates.get("datePublished"),
+        modified=(p.meta.get("article:modified_time") or p.meta.get("og:updated_time")
+                  or ld_dates.get("dateModified")),
         canonical=p.canonical,
         links=links,
         js_shell=p.root_div and words < 30,

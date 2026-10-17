@@ -222,15 +222,18 @@ def _serp_share(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
     move = {m["domain"]: m for m in serp.data["movement"]}
     gain = move.get(h.subject_site, {}).get("gain", 0.0)
     urls = serp.data["target_urls_after"].get(h.subject_site, [])
-    if gain < 1.0:
+    snapshot = bool(serp.data.get("snapshot_only"))   # 真實網站第一次研究：只有目前的 SERP，無從判斷「上升」
+    if not snapshot and gain < 1.0:
         return [Draft(h.id, "against", "moderate", [serp.id], f"{h.subject_site} 在主題 SERP 平均名次只變化 {gain:+.1f}，不是上升者")]
     if not urls:
         return []
     inside = [u for u in urls if template_key(u) == h.template]
     share = len(inside) / len(urls)
-    note = f"{h.subject_site} 的 SERP 排名網址 {len(inside)}/{len(urls)} 屬於 {h.template}"
+    note = f"{h.subject_site} 的 SERP 排名網址 {len(inside)}/{len(urls)} 屬於 {h.template}" \
+        + ("（目前的排名，沒有歷史可比較）" if snapshot else "")
     if share >= 0.5:
-        return [Draft(h.id, "for", "strong" if len(urls) >= 2 else "moderate", [serp.id], note)]
+        strong = len(urls) >= 2 and not snapshot
+        return [Draft(h.id, "for", "strong" if strong else "moderate", [serp.id], note)]
     if share == 0:
         return [Draft(h.id, "against", "strong" if len(urls) >= 2 else "moderate", [serp.id], note)]
     return [Draft(h.id, "for", "weak", [serp.id], note)]

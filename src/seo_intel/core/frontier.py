@@ -12,12 +12,13 @@ import math
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
 from seo_intel.tools.rank import tokens
 
 _SLUG_WITH_ID = re.compile(r"^[a-z0-9-]+-\d+$")
 _TRACKING = re.compile(r"^(utm_|fbclid|gclid|sessionid)")
+_PAGE_FILE = re.compile(r"[a-z].*\.(html?|php|aspx?)$", re.IGNORECASE)
 _NON_HTML = re.compile(r"\.(xml|txt|json|js|css|png|jpe?g|gif|svg|webp|pdf|zip)$", re.IGNORECASE)
 MIN_TEMPLATE_SIZE_FOR_SAMPLING = 3
 
@@ -45,11 +46,15 @@ def normalize_url(url: str) -> str:
 def template_key(url: str) -> str:
     parts = urlsplit(url)
     segs = []
-    for seg in [s for s in parts.path.split("/") if s]:
+    raw = [s for s in parts.path.split("/") if s]
+    for i, seg in enumerate(raw):
+        last = i == len(raw) - 1
         if seg.isdigit():
             segs.append("{n}")
-        elif _SLUG_WITH_ID.match(seg) or (len(seg) > 20 and "-" in seg):
-            segs.append("{slug}")
+        elif (_SLUG_WITH_ID.match(seg) or (len(seg) > 20 and "-" in seg)
+              or not unquote(seg).isascii()                                    # 中文等非 ASCII（含百分比編碼）
+              or (last and (_PAGE_FILE.search(seg) or (len(seg) >= 8 and ("-" in seg or "_" in seg))))):
+            segs.append("{slug}")   # 真實網站的文章代稱：WordPress 的短代稱、.html 頁面
         else:
             segs.append(seg)
     keys = sorted({k for k, _ in parse_qsl(parts.query)})
@@ -60,7 +65,7 @@ def detect_trap(tkey: str) -> str | None:
     path = tkey.split("/", 1)[1] if "/" in tkey else ""
     if "?" in path:
         return "query_params"
-    if path.count("{n}") >= 3:
+    if path.count("{n}") >= 3 and path.endswith("{n}"):   # /2024/05/12 是日曆；/2024/05/12/{slug} 是一般文章網址
         return "calendar"
     return None
 

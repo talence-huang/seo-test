@@ -234,14 +234,20 @@ def reflector_prompt(task: dict, claim: dict, verdict: str, reason: str, context
 
 
 def task_json(task: TaskInput) -> str:
-    return json.dumps({
+    data = {
         "question": task.question,
         "own_site": task.own_site,
         "competitors": task.competitors,
         "today": task.today.isoformat(),
         "analysis_period_hint": [d.isoformat() for d in task.period_hint] if task.period_hint else None,
         "site_language": task.site_language,
-    }, ensure_ascii=False, indent=2)
+    }
+    if task.mode == "real":   # 真實網站：告訴 LLM 哪些資料拿得到、哪些拿不到，避免規劃不存在的資料
+        data |= {"keywords": task.keywords, "environment": "live websites",
+                 "available_data": ["robots.txt and sitemaps", "live pages", "Wayback Machine snapshots"]
+                 + (["current search results for the keywords"] if task.serp_source in ("serpapi", "csv") else []),
+                 "unavailable_data": ["ranking history over time", "non-topic control queries"]}
+    return json.dumps(data, ensure_ascii=False, indent=2)
 
 
 def goal_prompt(task: TaskInput) -> str:

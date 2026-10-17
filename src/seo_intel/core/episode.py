@@ -42,13 +42,14 @@ def _block_rate(ctx: EpisodeContext, domain: str) -> tuple[float, int]:
 
 
 def build_context(state: EpisodeState, settings: Settings, llm: LLMClient, client: httpx.Client, clock: Clock,
-                  run_dir: Path, frontier: Frontier | None = None, memory=None) -> EpisodeContext:
+                  run_dir: Path, frontier: Frontier | None = None, memory=None, tools=None) -> EpisodeContext:
+    """tools：HttpToolkit → (排名工具, 歷史快照工具)；預設是模擬世界的 API，真實網站模式換成 SERP 來源與 Wayback。"""
     run_dir.mkdir(parents=True, exist_ok=True)
     ledger = BudgetLedger(settings.budget, state.budget, clock)
     http = HttpToolkit(client, clock, ledger, rate_interval=settings.policy.rate_limit_seconds_per_domain)
+    rank, archive = tools(http) if tools else (RankClient(http), ArchiveClient(http))
     ctx = EpisodeContext(state=state, settings=settings, llm=llm, http=http, ledger=ledger, policy=None,
-                         rank=RankClient(http), archive=ArchiveClient(http), clock=clock, run_dir=run_dir,
-                         frontier=frontier, memory=memory)
+                         rank=rank, archive=archive, clock=clock, run_dir=run_dir, frontier=frontier, memory=memory)
     ctx.policy = PolicyGate(settings.policy, state.task, http, ledger, block_rate=lambda d: _block_rate(ctx, d),
                             state=state, known_url=lambda u: _known_url(ctx, u))
     if frontier is not None and state.goal is not None and memory is not None:   # 續跑：重新接上記憶

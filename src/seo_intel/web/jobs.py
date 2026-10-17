@@ -25,6 +25,7 @@ from seo_intel.store import Database
 
 DEFAULT_DB = PROJECT_ROOT / "data" / "intel.db"
 REPORTS_DIR = PROJECT_ROOT / "evals" / "reports"
+UPLOADS = PROJECT_ROOT / "data" / "uploads"
 
 
 def make_llm(mode: str, settings, run_dir: Path):
@@ -103,6 +104,8 @@ class JobManager:
     # ---------- 研究 ----------
 
     def start_research(self, p: dict) -> Job:
+        if p.get("mode") == "real":
+            return self._start_real(p)
         from simweb import build
 
         settings0 = get_settings()
@@ -132,19 +135,57 @@ class JobManager:
         threading.Thread(target=self._run, args=(job, ctx, sim, False, []), daemon=True).start()
         return job
 
+    def _start_real(self, p: dict) -> Job:
+        from seo_intel.core.runner import prepare_real
+
+        mode = p.get("memory") or "default"
+        memory = None if mode == "none" else DEFAULT_MEMORY if mode == "default" else             (Path(mode) if Path(mode).is_absolute() else PROJECT_ROOT / mode)
+        budget = {k: (int(p[k]) if k == "max_fetches" else float(p[k])) for k in ("max_fetches", "max_llm_usd")
+                  if p.get(k) not in (None, "")}
+        run_cfg = {"memory": {"path": str(memory) if memory else None, "ablate": sorted(p.get("ablate") or [])},
+                   "budget": budget}
+        settings, mem = apply_run_config(get_settings(), run_cfg)
+        csv_path = None
+        if p.get("serp_source") == "csv":   # 網頁上傳的 CSV 先存成檔案，續跑時才讀得到
+            if not (p.get("serp_csv") or "").strip():
+                raise ValueError("選擇排名 CSV 時請上傳檔案")
+            UPLOADS.mkdir(parents=True, exist_ok=True)
+            csv_path = UPLOADS / f"serp-{int(time.time())}.csv"
+            csv_path.write_text(p["serp_csv"], encoding="utf-8")
+        params = {k: p.get(k) for k in ("competitors", "keywords", "own_site", "start", "end", "serp_source")}
+        params["csv_path"] = str(csv_path) if csv_path else None
+        with self._lock:
+            if (b := self.busy()) is not None:
+                raise RuntimeError(f"已有工作在執行（{b.kind} {b.episode_id or b.id}），請等它結束或暫停")
+        llm = p.get("llm", "fake")
+        try:
+            ctx = prepare_real(params, settings, lambda run_dir: make_llm(llm, settings, run_dir), memory=mem,
+                               run_cfg=run_cfg)
+        except Exception:
+            if mem:
+                mem.store.close()
+            raise
+        job = self._new("research", llm=llm, step_mode=bool(p.get("step")))
+        job.episode_id = ctx.state.id
+        self.by_episode[ctx.state.id] = job
+        job.emit("start", episode_id=ctx.state.id, task=ctx.state.task.model_dump(mode="json"),
+                 budget={"max_fetches": ctx.ledger.max_fetches, "max_llm_usd": ctx.ledger.max_llm_usd},
+                 memory=str(mem.store.path) if mem else None)
+        threading.Thread(target=self._run, args=(job, ctx, None, False, []), daemon=True).start()
+        return job
+
     def resume(self, episode_id: str, llm: str | None = None, step: bool = False) -> Job:
-        from simweb import VirtualClock, build
+        from seo_intel.core.runner import resume_context
 
         run_dir = RUNS_DIR / episode_id
-        state, frontier = load_checkpoint(run_dir)
+        state, _ = load_checkpoint(run_dir)
         if state.status in ("done", "failed"):
             raise RuntimeError(f"Episode 已結束（{state.status}）")
         settings, mem = apply_run_config(get_settings(), load_run_config(run_dir))
-        sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at), seed=state.world_seed)
         prev = self.by_episode.get(episode_id)
         mode = llm or (prev.llm if prev else "fake")
-        ctx = build_context(state, settings, make_llm(mode, settings, run_dir), sim.client(), sim.clock, run_dir,
-                            frontier, memory=mem)
+        ctx, sim = resume_context(run_dir, settings, lambda d: make_llm(mode, settings, d), mem)
+        state = ctx.state
         try:
             notes = approvals.resume(ctx)
         except approvals.ApprovalPending:

@@ -5,18 +5,28 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, timedelta
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 
 from seo_intel.tools.http import HttpToolkit
 from seo_intel.tools.stats import aggregate, change_stats
 
 BASELINE_DAYS = 30
-_TOKEN = re.compile(r"[a-z0-9]+")
+_TOKEN = re.compile(r"[a-z0-9]+|[㐀-䶿一-鿿豈-﫿]+")
 STOPWORDS = frozenset({"the", "a", "an", "and", "or", "for", "of", "to", "in", "on", "vs", "how", "what", "best"})
 
 
 def tokens(text: str) -> set[str]:
-    return {t for t in _TOKEN.findall(text.lower()) if t not in STOPWORDS}
+    """英數字以詞為單位；中文沒有空白分詞，改用相鄰兩字（雙字詞），單字詞則保留單字。網址先解碼百分比編碼。"""
+    out: set[str] = set()
+    for t in _TOKEN.findall(unquote(text).lower()):
+        if t.isascii():
+            if t not in STOPWORDS:
+                out.add(t)
+        elif len(t) == 1:
+            out.add(t)
+        else:
+            out |= {t[i:i + 2] for i in range(len(t) - 1)}
+    return out
 
 
 def matches_topic(query: str, keywords: list[str]) -> bool:

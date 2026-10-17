@@ -42,6 +42,25 @@ seo-intel web
 
 網頁與下列指令共用同一套檢查點、trace 與資料庫，兩者可以交替使用。
 
+## 研究真實網站
+
+在網頁的「研究」分頁選「真實網站」，輸入競品網址、關鍵字（每行一個）、研究期間與排名資料來源；或用指令：
+
+```powershell
+seo-intel research --site https://example.com --keyword 高山茶 --keyword 烏龍茶 --serp serpapi --max-fetches 80
+```
+
+| 資料 | 來源 | 說明 |
+|---|---|---|
+| 網站結構、頁面內容 | 直接抓取（robots.txt → sitemap，沒有 sitemap 時從首頁連結開始） | 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔 |
+| 頁面改了什麼 | Wayback Machine 歷史快照（免費） | 部分頁面可能沒有快照 |
+| 目前的搜尋排名 | `--serp serpapi`：SerpApi 取得 Google 台灣結果（在 `.env` 填 `SERPAPI_API_KEY`，按次計費）；`--serp csv --serp-csv 檔案`：從 Semrush、Ahrefs、Search Console 匯出的「關鍵字、排名、網址」；`--serp none`：不使用 | 不直接爬 Google（違反服務條款）；每次查到的排名都會存進 `data/serp_history.jsonl`，下次研究同一個關鍵字時就能算出名次變化 |
+| 排名歷史 | 沒有 | 所以研究的是「競品在這些關鍵字做了什麼內容策略」，不是「我們為什麼掉排名」 |
+
+- 真實網站沒有標準答案，結論的可信度來自證據本身（每個主張都能點回原始觀察）。
+- 建議搭配真實 Opus（`--llm live`）：假 LLM 只是測試用的規則式替身，常常提不出假設。
+- 研究的合法性與合規性由使用者負責，例如目標產業在當地是否合法、網站的使用條款。
+
 ## 指令
 
 ```powershell
@@ -57,6 +76,7 @@ seo-intel simweb fetch -s s1 <網址>      # 在模擬世界中抓取一個網�
 seo-intel research --scenario s1 --step  # 逐步觀察研究迴圈（--llm fake 免費）
 seo-intel research resume <episode>      # 從檢查點續跑（沿用原本的記憶與預算設定；先套用人工核准的決定）
 seo-intel research -s s1 --no-memory     # 不用記憶（Day 1）；--memory <檔案> 指定記憶、--ablate M1,M2 消融
+seo-intel research --site <網址> -k <關鍵字> --serp none|serpapi|csv   # 研究真實網站（見上方說明）
 seo-intel research -s s1 --max-fetches 30 --step   # 緊縮預算：預算用盡時暫停請求核准（--step 可當場決定）
 seo-intel approvals list                 # 待核准的請求（--all 含已決定的）
 seo-intel approvals approve <A-id|episode> --note "..."   # 核准（一次性、24 小時內有效）
@@ -106,6 +126,7 @@ src/seo_intel/
   core/            研究迴圈：狀態機、步驟、行動候選、Frontier、預算、PolicyGate、檢查點
   tools/           HTTP 包裝層、萃取、差異、排名、歷史快照、網站探勘
   observe/         即時主控台、trace、資料庫紀錄、timeline.html
+  real/            真實網站研究：SERP 來源（SerpApi / CSV）、Wayback 歷史、執行環境
   web/             本機網頁介面（標準庫 HTTP 伺服器 + 單頁前端，無額外套件）
   evals/           評測：確定性評分器、Day 1 / Day N 協定、報告
   memory/          記憶：經驗庫（M1）、URL 價值先驗（M2）、REFLECT 規則、人工糾偏、治理（data/memory.db）

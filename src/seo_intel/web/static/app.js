@@ -58,6 +58,7 @@ async function refreshStatus() {
     $("#llm-live").disabled = !STATUS.has_key;
     $("#key-hint").textContent = STATUS.has_key ? "" : "沒有偵測到 API 金鑰（.env 的 ANTHROPIC_API_KEY），只能使用假 LLM。";
     $("#eval-live").disabled = !STATUS.has_key;
+    updateSerpHint();
     const pending = await api("/api/approvals");
     const badge = $("#pending-badge");
     badge.hidden = pending.length === 0;
@@ -81,15 +82,52 @@ function describeScenario() {
 $("#scenario").addEventListener("change", describeScenario);
 $("#memory-mode").addEventListener("change", (e) => { $("#memory-path").hidden = e.target.value !== "custom"; });
 
+function researchMode() { return new FormData($("#research-form")).get("mode"); }
+function updateMode() {
+  const real = researchMode() === "real";
+  $("#real-fields").hidden = !real;
+  $("#sim-fields").hidden = real;
+  $("#seed-label").hidden = real;
+  $("#llm-real-hint").hidden = !real;
+  $("#max-fetches").placeholder = real ? "建議 80" : "預設 300";
+  updateSerpHint();
+}
+function updateSerpHint() {
+  const src = $("#serp-source").value;
+  $("#serp-csv").hidden = src !== "csv";
+  $("#serp-hint").innerHTML = src === "serpapi"
+    ? (STATUS.has_serp_key ? "會為每個關鍵字查詢一次 Google 台灣（gl=tw）的前 100 名；結果會存檔，下次研究就能看到名次變化。"
+      : '<span class="error">沒有偵測到 SerpApi 金鑰：請在 .env 填入 SERPAPI_API_KEY 後重新啟動 seo-intel web。</span>')
+    : src === "csv" ? "CSV 需要「關鍵字、排名、網址」三欄（英文欄名 Keyword / Position / URL 也可以）。"
+    : "沒有排名資料時，Agent 從 sitemap、頁面內容與歷史版本推斷競品的內容策略。";
+}
+$$('#research-form input[name="mode"]').forEach((r) => r.addEventListener("change", updateMode));
+$("#serp-source").addEventListener("change", updateSerpHint);
+const readFile = (file) => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsText(file, "utf-8"); });
+const lines = (v) => String(v || "").split(/[\n,，、]+/).map((x) => x.trim()).filter(Boolean);
+
 $("#research-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
   const mode = f.get("memory");
-  const body = { scenario: f.get("scenario"), llm: f.get("llm"), step: f.get("step") === "on",
+  const body = { mode: f.get("mode"), llm: f.get("llm"), step: f.get("step") === "on",
     memory: mode === "custom" ? (f.get("memory_path") || "default") : mode, ablate: f.getAll("ablate"),
-    max_fetches: f.get("max_fetches") || null, max_llm_usd: f.get("max_llm_usd") || null, seed: f.get("seed") || null };
-  if (body.llm === "live" && !confirm("真實 Opus 每次研究約 US$0.3，確定要執行嗎？")) return;
+    max_fetches: f.get("max_fetches") || null, max_llm_usd: f.get("max_llm_usd") || null };
   showError($("#research-error"), null);
+  if (body.mode === "real") {
+    Object.assign(body, { competitors: lines(f.get("competitors")), keywords: lines(f.get("keywords")),
+      own_site: f.get("own_site") || null, start: f.get("start") || null, end: f.get("end") || null,
+      serp_source: f.get("serp_source") });
+    if (!body.competitors.length || !body.keywords.length) { showError($("#research-error"), "請至少填一個競品網址與一個關鍵字"); return; }
+    if (body.serp_source === "csv") {
+      const file = $("#serp-csv").files[0];
+      if (!file) { showError($("#research-error"), "請選擇排名 CSV 檔"); return; }
+      body.serp_csv = await readFile(file);
+    }
+  } else {
+    Object.assign(body, { scenario: f.get("scenario"), seed: f.get("seed") || null });
+  }
+  if (body.llm === "live" && !confirm("真實 Opus 每次研究約 US$0.3，確定要執行嗎？")) return;
   try {
     const job = await api("/api/research", body);
     watchJob(job.id, true);
@@ -141,7 +179,8 @@ function handleEvent(ev) {
   if (ev.type === "start" || ev.type === "resume") {
     RUN.episode = ev.episode_id;
     $("#run-title").textContent = `Episode ${ev.episode_id}${ev.type === "resume" ? "（續跑）" : ""}`;
-    if (ev.task) $("#run-question").textContent = ev.task.question;
+    if (ev.task) $("#run-question").textContent = ev.task.mode === "real"
+      ? `真實網站：${ev.task.competitors.join("、")}｜關鍵字：${(ev.task.keywords || []).join("、")}` : ev.task.question;
     if (ev.budget) RUN.budget = ev.budget;
     if (ev.type === "resume") $("#run-result").innerHTML = "";
   } else if (ev.type === "step") {
@@ -435,6 +474,7 @@ function markdown(src) {
 }
 
 // ---------- 啟動 ----------
+updateMode();
 loadScenarios().catch((e) => showError($("#research-error"), e));
 refreshStatus();
 setInterval(refreshStatus, 5000);

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
 import re
 import secrets
 import sqlite3
@@ -57,6 +58,13 @@ def _state_dict(run_dir: Path) -> dict:
     return state
 
 
+def _label(task: dict) -> str:
+    """情境代號；真實網站則顯示「網站：關鍵字」。"""
+    if task.get("mode") == "real":
+        return f"{'、'.join(task['competitors'])}：{'、'.join(task.get('keywords') or [])}"
+    return task.get("scenario") or "—"
+
+
 def _pending(st: dict) -> dict | None:
     return next((a for a in reversed(st.get("approvals") or []) if a["status"] == "pending"), None)
 
@@ -84,7 +92,8 @@ class App:
         from seo_intel.env import has_anthropic_credentials
 
         busy = self.jobs.busy()
-        return {"version": __version__, "has_key": has_anthropic_credentials(), "busy": busy.info() if busy else None,
+        return {"version": __version__, "has_key": has_anthropic_credentials(),
+                "has_serp_key": bool(os.environ.get("SERPAPI_API_KEY")), "busy": busy.info() if busy else None,
                 "memory": str(DEFAULT_MEMORY), "budget": get_settings().budget.model_dump()}
 
     def scenarios(self) -> list[dict]:
@@ -100,7 +109,7 @@ class App:
             st = _state_dict(d)
             job = self.jobs.by_episode.get(st["id"])
             pa = _pending(st)
-            out.append({"id": st["id"], "scenario": st["task"]["scenario"], "seed": st.get("world_seed"),
+            out.append({"id": st["id"], "scenario": _label(st["task"]), "seed": st.get("world_seed"),
                         "status": st["status"], "end_reason": st.get("end_reason"), "seq": st["seq"],
                         "fetches": st["budget"]["fetches"], "llm_usd": round(st["budget"]["llm_usd"], 4),
                         "claims": [c["template"] for c in st.get("claims") or []],
@@ -112,7 +121,7 @@ class App:
         for d in _episode_dirs():
             st = _state_dict(d)
             if (a := _pending(st)) is not None:
-                out.append({"episode": st["id"], "scenario": st["task"]["scenario"], **a})
+                out.append({"episode": st["id"], "scenario": _label(st["task"]), **a})
         return out
 
     def memory(self, path: Path) -> dict:

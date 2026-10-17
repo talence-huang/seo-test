@@ -112,3 +112,10 @@ tr.clickable { cursor: pointer; } tr.clickable:hover { background: var(--accent-
 .markdown blockquote { margin: .5rem 0; padding: .3rem .8rem; border-left: 3px solid var(--line); color: var(--muted); }
 .markdown td:first-child { white-space: nowrap; }
 td:first-child { white-space: nowrap; }
+.segmented { display: flex; gap: .3rem; padding: .25rem; background: var(--code); border-radius: 10px; margin-bottom: .6rem; }
+.segmented label { flex: 1; text-align: center; margin: 0 !important; padding: .35rem .3rem; border-radius: 8px; cursor: pointer;
+  font-size: .88rem; color: var(--muted); }
+.segmented input { display: none; }
+.segmented label:has(input:checked) { background: var(--card); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.two label { margin: .3rem 0; }
