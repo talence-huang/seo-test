@@ -189,10 +189,31 @@ def profile(pages: list[dict]) -> dict:
     return out
 
 
+RATIO_GAP = {"content_depth", "sections", "internal_links", "link_growth"}   # 以「自家 ÷ 競品」計算差距的維度
+
+
 def gap(key: str, competitor: float | None, own: float | None) -> float | None:
-    """自家在某維度上落後競品多少（0＝沒有差距，1＝完全沒做）。數字型以中位數比例計。None＝無法比較。"""
+    """自家在某維度上落後競品多少（0＝沒有差距，1＝完全沒做）。None＝無法比較。
+    數量型（字數、段落、連入數、新增引用網域）以比例計；比例型（普及率、錨點、連結指向）以差值計。"""
     if competitor is None or own is None:
         return None
-    if DIMENSIONS[key].kind == "numeric":
+    if key in RATIO_GAP:
         return round(max(0.0, 1 - own / competitor), 3) if competitor else 0.0
     return round(max(0.0, competitor - own), 3)
+
+
+def offpage_values(link_profile: dict) -> dict:
+    """反向連結輪廓 → Off-page 維度的值（給差距計算用）。"""
+    return {"link_growth": link_profile.get("new_ref_domains_in_window"),
+            "anchor_keyword": (link_profile.get("anchor_share") or {}).get("keyword", 0.0),
+            "link_to_ranking": link_profile.get("share_to_ranking_pages")}
+
+
+def fmt(key: str, value: float | None) -> str:
+    """維度的值寫成人看得懂的格式：普及率與比例用百分比，數量用數字。"""
+    if value is None:
+        return "—"
+    if key in RATIO_GAP:
+        return f"{value:,.0f}" + {"content_depth": " 字", "sections": " 段", "internal_links": " 個連入",
+                                  "link_growth": " 個新網域"}[key]
+    return f"{value:.0%}"

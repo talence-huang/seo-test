@@ -13,9 +13,10 @@ from collections import Counter
 from datetime import date, timedelta
 from urllib.parse import urlsplit
 
-from seo_intel.core import approvals, beliefs, probes, profiles, strategy
+from seo_intel.core import approvals, beliefs, priority, probes, profiles, strategy
 from seo_intel.core.actions import COMPONENT_LABELS, compute_phase, focus_satisfied, generate
-from seo_intel.core.claims import confounder_note, derive_claims, render_markdown, validate_citations
+from seo_intel.core.claims import (confounder_note, derive_claims, inconclusive_reasons, render_markdown,
+                                   validate_citations)
 from seo_intel.core.context import EpisodeContext, StepOutcome, llm_record
 from seo_intel.core.digest import hypotheses_digest, observation_digest
 from seo_intel.core.frontier import Frontier, normalize_url, template_key
@@ -43,6 +44,7 @@ from seo_intel.llm.roles import (
 )
 from seo_intel.llm.types import LLMError
 from seo_intel.real.backlinks import link_profile
+from seo_intel.real.env import data_gaps
 from seo_intel.tools.extract import PageFeatures, looks_like_instructions, redact_instructions
 from seo_intel.tools.history import history_diff
 from seo_intel.tools.text import tokens
@@ -751,6 +753,7 @@ def parse_result(ctx: EpisodeContext) -> StepOutcome:
 # ---------- FORM_HYPOTHESES ----------
 
 MAX_HYPOTHESIS_ROUNDS = 2
+MAX_HYPOTHESES_PER_ROUND = 6   # 三個問題：On-page 幾個做法、Off-page、加上競爭的解釋
 MAX_SEEK_ROUNDS = 2
 MAX_VERIFY_PER_REVISE = 2
 STATUS_ZH = {"proposed": "提出", "testing": "測試中", "supported": "成立", "refuted": "推翻",
@@ -771,11 +774,12 @@ def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
     out, records, error = _call_llm(ctx, "hypothesizer", user, HypothesesOut, system=HYPOTHESIZER_SYSTEM)
     known = set(digest["known_templates"])
     details, new = list(pre.details), []
-    for raw in (out.hypotheses[:4] if out else []):
+    for raw in (out.hypotheses[:MAX_HYPOTHESES_PER_ROUND] if out else []):
         fields, reason = beliefs.validate({
             "category": raw.category, "statement": raw.statement, "subject_site": raw.subject_site,
-            "template": raw.template, "mechanism": raw.mechanism, "prediction": raw.prediction,
-            "falsification": raw.falsification, "cited": raw.cited_observations, "prior": raw.prior}, st, known)
+            "template": raw.template, "dimension": raw.dimension, "mechanism": raw.mechanism,
+            "prediction": raw.prediction, "falsification": raw.falsification, "cited": raw.cited_observations,
+            "prior": raw.prior}, st, known)
         if ctx.memory is not None and not reason:   # M1 偏置：調整某類假設的先驗
             for lesson, b in ctx.memory.biases("hypothesis_prior"):
                 if b.category == fields["category"]:
@@ -784,6 +788,7 @@ def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
                     ctx.memory.mark(st, lesson, "hypothesis_prior")
         h = Hypothesis(id=f"H{len(st.hypotheses) + 1}", round=st.hypothesis_round, category=fields["category"],
                        statement=fields["statement"], subject_site=fields["subject_site"], template=fields["template"],
+                       dimension=fields["dimension"],
                        mechanism=fields["mechanism"], prediction=fields["prediction"],
                        falsification=fields["falsification"], cited=fields["cited"], prior=fields["prior"],
                        posterior=fields["prior"], status="rejected" if reason else "testing",
@@ -795,7 +800,8 @@ def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
         if reason:
             details.append(f"✗ {h.id} 拒收（{reason}）：{h.statement}")
         else:
-            details += [f"{h.id} [{h.category}] {h.template or '全站'}，先驗 {h.prior:.2f}：{h.statement}",
+            target = strategy.label(h.dimension) if h.dimension else (h.template or "全站")
+            details += [f"{h.id} [{h.category}] {target}，先驗 {h.prior:.2f}：{h.statement}",
                         f"    預測：{h.prediction}",
                         f"    反證：{h.falsification}（引用 {', '.join(h.cited)}）"]
     if out:
@@ -907,6 +913,14 @@ def _excerpt(o) -> dict:
         return {k: d.get(k) for k in ("status", "snapshot_date", "current_modified", "words_change_pct", "change_types")}
     if o.kind == "page":
         return {k: d.get(k) for k in ("modified", "published", "words", "schema", "faq", "new_page")}
+    if o.kind == "onpage_profile":
+        return {k: d.get(k) for k in ("has_serp", "n_ranking", "n_others", "ranking_profile", "others_profile",
+                                      "contrast", "adopted_in_window", "n_diffed")}
+    if o.kind == "own_profile":
+        return {k: d.get(k) for k in ("n", "profile")}
+    if o.kind == "link_profile":
+        return {k: d.get(k) for k in ("n_links", "n_ref_domains", "new_ref_domains_in_window", "baseline_in_same_length",
+                                      "growth_ratio", "anchor_share", "top_targets", "share_to_ranking_pages")}
     return {}
 
 
@@ -914,8 +928,9 @@ def _red_team(ctx: EpisodeContext, h: Hypothesis) -> tuple[list[dict], list[str]
     st = ctx.state
     hd = next(d for d in hypotheses_digest(ctx, include_reasoning=False) if d["id"] == h.id)
     wanted = {o for e in st.evidence_for(h.id) for o in e.observation_ids} | set(h.cited)
+    context_kinds = ("rank_change", "rank_control", "serp_shift", "site_inventory", "onpage_profile", "link_profile")
     observations = [{"id": o.id, "kind": o.kind, "summary": o.summary, "data": _excerpt(o)} for o in st.observations
-                    if o.id in wanted or o.kind in ("rank_change", "rank_control", "serp_shift", "site_inventory")]
+                    if o.id in wanted or (o.kind in context_kinds and o.data.get("site", h.subject_site) == h.subject_site)]
     out, records, error = _call_llm(ctx, "verifier", verifier_prompt(hd, observations, _catalog(probes.CATALOG)),
                                     VerifierOut, system=VERIFIER_SYSTEM)
     if out is None:
@@ -1074,19 +1089,25 @@ def report(ctx: EpisodeContext) -> StepOutcome:
             h.status = "inconclusive"
     claims = derive_claims(ctx)
     st.claims = claims
+    own, own_obs = _own_values(st)
+    st.actions = priority.rank(claims, own, own_obs)   # 優先行動由程式排序：影響 × 自家差距 ÷ 難度
+    reasons = [] if any(c.validated for c in claims) else inconclusive_reasons(st)
+    gaps = data_gaps(st.task)
     confounder = confounder_note(st)
     records, error, raw = [], None, None
     if st.goal is not None:
         out, records, error = _call_llm(ctx, "reporter", report_prompt(
-            st.task, st.goal, [c.model_dump(mode="json") for c in claims], hypotheses_digest(ctx), confounder),
+            st.task, st.goal, [c.model_dump(mode="json") for c in claims], hypotheses_digest(ctx), confounder,
+            actions=[a.model_dump(mode="json") for a in st.actions], reasons=reasons, gaps=gaps),
             ReportOut, system=REPORTER_SYSTEM)
         raw = out.model_dump() if out else None
     raw = raw or {"headline": "", "summary": f"（報告敘述產生失敗：{error}）", "findings": [], "excluded": [],
                   "caveats": [], "recommendations": []}
-    cleaned, stats = validate_citations(raw, st, claims)
+    cleaned, stats = validate_citations(raw, st, claims, st.actions)
     # 程式補上的限制（人工拒絕、預算用盡、安全事件）：不依賴 LLM 是否提到
     cleaned["caveats"] = list(cleaned.get("caveats", [])) + [f"（系統）{x}" for x in st.limitations] + \
         [f"（安全）{x}" for x in st.security_events]
+    cleaned["inconclusive_reasons"], cleaned["data_gaps"] = reasons, gaps
     st.report = {**cleaned, "citations": stats, "confounder": confounder}
     if st.goal is not None:
         (ctx.run_dir / "report.md").write_text(render_markdown(st, claims, cleaned, stats, confounder), encoding="utf-8")
@@ -1095,14 +1116,20 @@ def report(ctx: EpisodeContext) -> StepOutcome:
         "episode": st.id, "task": st.task.model_dump(mode="json"), "end_reason": st.end_reason,
         "goal": st.goal.model_dump(mode="json") if st.goal else None,
         "claims": [c.model_dump(mode="json") for c in claims],
+        "actions": [a.model_dump(mode="json") for a in st.actions],
         "hypotheses": [h.model_dump(mode="json") for h in st.hypotheses],
         "evidence": [e.model_dump(mode="json") for e in st.evidence],
         "report": st.report, "info_needs": [n.model_dump(mode="json") for n in st.info_needs],
         "budget": b.model_dump(), "approvals": [a.model_dump(mode="json") for a in st.approvals],
         "limitations": st.limitations, "security_events": st.security_events,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    details = [f"{c.id} {c.subject_site}{c.template_prefix}：{', '.join(c.change_types)}，信心 {c.confidence:.2f}，"
-               f"證據 {', '.join(c.evidence_ids)}{'' if c.validated else '（未通過驗證）'}" for c in claims]
+    details = [f"{c.id} {c.subject_site}"
+               + (f" {strategy.label(c.dimension)}" if c.dimension else f"{c.template_prefix}：{', '.join(c.change_types)}")
+               + f"，信心 {c.confidence:.2f}，證據 {', '.join(c.evidence_ids)}{'' if c.validated else '（未通過驗證）'}"
+               for c in claims]
+    details += [f"{a.id} {a.action}（{a.label}；競品 {strategy.fmt(a.dimension, a.competitor)}、自家 "
+                f"{strategy.fmt(a.dimension, a.own)}、難度 {a.effort}、分數 {a.score:.2f}）" for a in st.actions]
+    details += [f"沒有結論的原因：{x}" for x in reasons]
     details += [f"{h.id} {STATUS_ZH[h.status]}（{h.posterior:.2f}）：{h.statement}" for h in st.hypotheses
                 if h.status != "supported"]
     if confounder:
@@ -1112,6 +1139,22 @@ def report(ctx: EpisodeContext) -> StepOutcome:
     return StepOutcome(summary=cleaned["headline"] or f"研究結束（{st.end_reason}）", details=details, llm=records,
                        decision={"end_reason": st.end_reason, "claims": [c.model_dump(mode="json") for c in claims]},
                        reason=error)
+
+
+def _own_values(st) -> tuple[dict | None, str | None]:
+    """自家網站在各維度的值（On-page 來自自家輪廓、Off-page 來自自家的反向連結）。沒有自家網站時回傳 None。"""
+    if not st.task.own_site:
+        return None, None
+    values: dict = {}
+    obs = None
+    prof = [o for o in st.observations if o.kind == "own_profile"]
+    if prof and prof[-1].data["n"]:
+        values.update(prof[-1].data["profile"])
+        obs = prof[-1].id
+    links = [o for o in st.observations if o.kind == "link_profile" and o.data.get("own")]
+    if links:
+        values.update({k: v for k, v in strategy.offpage_values(links[-1].data).items() if v is not None})
+    return values, obs
 
 
 # ---------- REFLECT ----------

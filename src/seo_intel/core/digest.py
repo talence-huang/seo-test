@@ -91,7 +91,7 @@ def hypotheses_digest(ctx: EpisodeContext, include_reasoning: bool = True) -> li
         if h.status == "rejected":
             continue
         d = {"id": h.id, "category": h.category, "statement": h.statement, "subject_site": h.subject_site,
-             "template": h.template, "prediction": h.prediction, "falsification": h.falsification,
+             "template": h.template, "dimension": h.dimension, "prediction": h.prediction, "falsification": h.falsification,
              "posterior": h.posterior, "status": h.status,
              "evidence": [{"id": e.id, "probe": e.probe, "direction": e.direction, "strength": e.strength,
                            "note": e.note, "observations": e.observation_ids} for e in ctx.state.evidence_for(h.id)]}

@@ -123,8 +123,9 @@ class Observation(BaseModel):
     url: str | None = None
 
 
-HypothesisCategory = Literal["competitor_content_change", "competitor_new_pages", "sitewide_factor",
-                             "own_site_change", "other"]
+HypothesisCategory = Literal["onpage_strategy", "offpage_strategy", "competitor_content_change",
+                             "competitor_new_pages", "sitewide_factor", "own_site_change", "other"]
+STRATEGY_CATEGORIES = {"onpage_strategy": "onpage", "offpage_strategy": "offpage"}
 Strength = Literal["weak", "moderate", "strong"]
 
 
@@ -135,6 +136,7 @@ class Hypothesis(BaseModel):
     statement: str
     subject_site: str | None = None
     template: str | None = None          # 範本鍵，例如 example.com/guide/{slug}
+    dimension: str | None = None         # 策略假設的維度（core/strategy.py 的固定詞彙）
     mechanism: str = ""
     prediction: str
     falsification: str
@@ -173,7 +175,7 @@ class Probe(BaseModel):
 
 class Claim(BaseModel):
     id: str
-    claim_type: Literal["displacement_cause", "content_strategy"]
+    claim_type: Literal["onpage_strategy", "offpage_strategy", "displacement_cause", "content_strategy"]
     subject_site: str
     template: str
     template_prefix: str
@@ -186,6 +188,27 @@ class Claim(BaseModel):
     evidence_ids: list[str]
     observation_ids: list[str]
     validated: bool = False
+    dimension: str | None = None              # 策略結論的維度
+    measure: dict[str, Any] = {}              # 程式量測的數字（競品排名頁的普及率、對比、連結指標…）
+
+
+class PriorityAction(BaseModel):
+    """優先行動：由程式依「影響 × 差距 ÷ 難度」排序（core/priority.py），LLM 只寫說明。"""
+
+    id: str
+    dimension: str
+    label: str
+    side: Literal["onpage", "offpage"]
+    action: str
+    status: Literal["do", "maintain", "unknown"]   # 要做 / 自家已做到 / 沒有自家資料、無法比較
+    score: float
+    impact: float
+    gap: float | None
+    effort: int
+    competitor: float | None
+    own: float | None
+    claim_id: str
+    observation_ids: list[str] = []
 
 
 class Approval(BaseModel):
@@ -250,6 +273,7 @@ class EpisodeState(BaseModel):
     seek_rounds: int = 0                 # 本輪假設已尋找證據的次數
     belief_history: list[dict[str, Any]] = []
     claims: list[Claim] = []
+    actions: list[PriorityAction] = []
     report: dict[str, Any] | None = None
     lessons_applied: dict[str, list[str]] = {}    # 經驗 ID → 被套用的位置
     reflection: dict[str, Any] | None = None

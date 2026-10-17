@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import math
 
-from seo_intel.core.models import EpisodeState, EvidenceItem, Hypothesis
+from seo_intel.core import strategy
+from seo_intel.core.models import STRATEGY_CATEGORIES, EpisodeState, EvidenceItem, Hypothesis
 
 WEIGHT = {"weak": 0.3, "moderate": 0.8, "strong": 1.5}
 PRIOR_RANGE = (0.1, 0.6)        # 任何假設的先驗都不超過 0.6：必須靠證據升上去
@@ -54,9 +55,27 @@ def validate(raw: dict, state: EpisodeState, known_templates: set[str]) -> tuple
             reasons.append("範本不屬於 subject_site")
     if category == "own_site_change" and site != state.task.own_site:
         reasons.append("own_site_change 的 subject_site 必須是自家站")
-    fields = {**raw, "cited": cited, "subject_site": site, "template": template,
+    dimension = None
+    notes = []
+    if category in STRATEGY_CATEGORIES:   # 策略假設：維度必須是固定詞彙，且要有對應的輪廓資料可以檢驗
+        side = STRATEGY_CATEGORIES[category]
+        dimension = raw.get("dimension") or None
+        dim = strategy.DIMENSIONS.get(dimension)
+        if dim is None or dim.side != side:
+            reasons.append(f"dimension {dimension} 不是 {side} 的策略維度")
+        if site not in state.task.competitors:
+            reasons.append(f"subject_site {site} 不是任務中的競品")
+        kind = "onpage_profile" if side == "onpage" else "link_profile"
+        if not any(o.kind == kind and o.data.get("site") == site for o in state.observations):
+            reasons.append(f"沒有 {site} 的{'排名頁輪廓' if side == 'onpage' else '反向連結資料'}，無法檢驗")
+        if template and template not in known_templates:
+            notes.append(f"範本 {template} 不在已觀察到的範本中，已移除")
+            template = None
+    fields = {**raw, "cited": cited, "subject_site": site, "template": template, "dimension": dimension,
               "prior": clamp_prior(float(raw.get("prior", 0.3)))}
-    note = f"已移除 {dropped} 個不存在的觀察引用" if dropped else None
+    if dropped:
+        notes.insert(0, f"已移除 {dropped} 個不存在的觀察引用")
+    note = "；".join(notes) or None
     return fields | {"note": note}, ("；".join(reasons) or None)
 
 

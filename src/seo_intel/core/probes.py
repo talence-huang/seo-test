@@ -10,11 +10,14 @@ import hashlib
 import math
 from dataclasses import dataclass
 
+from seo_intel.core import strategy
 from seo_intel.core.context import EpisodeContext
 from seo_intel.core.frontier import site_recent_share, template_key
 from seo_intel.core.models import Action, Hypothesis, Observation, Phase, Probe, Strength
 
 COMPETITOR = frozenset({"competitor_content_change", "competitor_new_pages"})
+ONPAGE = frozenset({"onpage_strategy"})
+OFFPAGE = frozenset({"offpage_strategy"})
 
 
 @dataclass(frozen=True)
@@ -35,8 +38,22 @@ CATALOG: dict[str, ProbeSpec] = {
     "template_change_sample": ProbeSpec(
         "範本變動抽樣", "抓取最多 4 次 + 歷史快照", COMPETITOR | {"own_site_change"},
         "在假設範本中擴大抽樣並比對歷史版本，計算確實變動的頁面比例。"),
+    "ranking_contrast": ProbeSpec(
+        "排名頁對比", "免費", ONPAGE,
+        "這個做法在競品有排名的頁面，是否比同網站其他主題頁明顯更普遍（Fisher 精確檢定；數字型為中位數檢定）；"
+        "兩邊一樣普遍代表不是排名頁特有的做法。"),
+    "ranking_prevalence": ProbeSpec(
+        "排名頁普及率", "免費", ONPAGE,
+        "競品有排名的頁面中，採用這個做法的比例；很少採用就不是它的策略。"),
+    "adoption_timing": ProbeSpec(
+        "採用時序", "免費", ONPAGE,
+        "比對排名頁改版前後（Wayback），這個做法是不是研究期間內才加上的。"),
+    "link_signal": ProbeSpec(
+        "反向連結訊號", "免費", OFFPAGE,
+        "從使用者提供的反向連結資料：期間內新增引用網域（相對平常速度）、錨點含關鍵字的比例、連結指向排名頁的比例。"),
 }
-FREE = ("serp_template_share", "template_burst")   # 排名歷史類的探針（對照組、時序、競品排名變化）需要逐日排名，真實網站拿不到
+# 排名歷史類的探針（對照組、時序、競品排名變化）需要逐日排名，真實網站拿不到
+FREE = ("serp_template_share", "template_burst", "ranking_contrast", "ranking_prevalence", "adoption_timing", "link_signal")
 COSTLY = ("template_change_sample",)
 SAMPLE_FETCHES = 6
 STRATEGIC_RATE = 0.3      # 「策略性改版」至少應涉及範本中約 30% 的主題頁
@@ -256,7 +273,135 @@ def _sample(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
                                                     f"低於 {STRATEGIC_RATE:.0%} p={p_below_strategy:.2f}），不計入證據")]
 
 
-_EVAL = {"serp_template_share": _serp_share, "template_burst": _burst, "template_change_sample": _sample}
+def _onpage(ctx: EpisodeContext, h: Hypothesis):
+    prof = _latest(ctx, "onpage_profile", site=h.subject_site)
+    return prof if prof is not None and h.dimension in strategy.DIMENSIONS else None
+
+
+def _contrast(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
+    prof = _onpage(ctx, h)
+    if prof is None:
+        return []
+    if not prof.data["has_serp"]:
+        return [Draft(h.id, "none", "weak", [prof.id], "沒有排名資料：無法比較有排名與沒排名的頁面，不計入證據")]
+    row = next((r for r in prof.data["contrast"] if r["dimension"] == h.dimension), None)
+    if row is None or row["n_group"] < 3 or row["n_others"] < 3:
+        n = (row or {}).get("n_group", 0), (row or {}).get("n_others", 0)
+        return [Draft(h.id, "none", "weak", [prof.id], f"樣本不足（排名頁 {n[0]} 頁、其他主題頁 {n[1]} 頁），不計入證據")]
+    label, p_val, enough = strategy.label(h.dimension), row["p"], min(row["n_group"], row["n_others"]) >= 4
+    if row["kind"] == "bool":
+        diff = row["diff"]
+        note = (f"{label}：排名頁 {row['group']:.0%}、同網站其他主題頁 {row['others']:.0%}（差 {diff:+.0%}，"
+                f"Fisher p={p_val:.3f}，{row['n_group']} vs {row['n_others']} 頁）")
+        if diff >= 0.5 and p_val < 0.01:
+            return [Draft(h.id, "for", "strong", [prof.id], note + "：排名頁特有的做法")]
+        if diff >= 0.3 and p_val < 0.05:
+            return [Draft(h.id, "for", "moderate", [prof.id], note + "：排名頁明顯較普遍")]
+        if diff >= 0.2 and p_val < 0.2:
+            return [Draft(h.id, "for", "weak", [prof.id], note + "：排名頁較普遍，但樣本還不足以確定")]
+        if diff <= -0.3 and p_val < 0.05:
+            return [Draft(h.id, "against", "strong", [prof.id], note + "：排名頁反而較少採用")]
+        if abs(diff) < 0.15 and enough:
+            return [Draft(h.id, "against", "moderate", [prof.id], note + "：兩邊一樣普遍，不是排名頁特有的做法")]
+        return [Draft(h.id, "none", "weak", [prof.id], note + "：差異不明確，不計入證據")]
+    ratio = row["ratio"] if row["ratio"] is not None else float("inf")
+    note = (f"{label}：排名頁中位數 {row['group']:g}、同網站其他主題頁 {row['others']:g}"
+            f"（{'—' if ratio == float('inf') else f'{ratio:g} 倍'}，中位數檢定 p={p_val:.3f}）")
+    if ratio >= 2 and p_val < 0.01:
+        return [Draft(h.id, "for", "strong", [prof.id], note + "：排名頁明顯更多")]
+    if ratio >= 1.5 and p_val < 0.05:
+        return [Draft(h.id, "for", "moderate", [prof.id], note + "：排名頁明顯更多")]
+    if ratio >= 1.3 and p_val < 0.2:
+        return [Draft(h.id, "for", "weak", [prof.id], note + "：排名頁較多，但樣本還不足以確定")]
+    if ratio <= 0.67 and p_val < 0.05:
+        return [Draft(h.id, "against", "strong", [prof.id], note + "：排名頁反而較少")]
+    if 0.8 <= ratio <= 1.25 and enough:
+        return [Draft(h.id, "against", "moderate", [prof.id], note + "：兩邊差不多，不是排名頁特有的做法")]
+    return [Draft(h.id, "none", "weak", [prof.id], note + "：差異不明確，不計入證據")]
+
+
+def _prevalence(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
+    prof = _onpage(ctx, h)
+    if prof is None or strategy.DIMENSIONS[h.dimension].kind != "bool":
+        return []
+    has_serp = prof.data["has_serp"]
+    share = (prof.data["ranking_profile"] if has_serp else prof.data["others_profile"]).get(h.dimension)
+    n = prof.data["n_ranking"] if has_serp else prof.data["n_others"]
+    if share is None or n < 3:
+        return [Draft(h.id, "none", "weak", [prof.id], f"可量測的頁面不足（{n} 頁），不計入證據")]
+    who = "排名頁" if has_serp else "主題頁（沒有排名資料）"
+    note = f"{strategy.label(h.dimension)}：競品{who} {n} 頁中 {share:.0%} 採用"
+    weak = not has_serp   # 沒有排名資料時，普及率只能說明「競品主題頁怎麼做」，證據力較弱
+    if share >= 0.8:
+        return [Draft(h.id, "for", "weak" if weak else "moderate", [prof.id], note + "：普遍採用")]
+    if share >= 0.6:
+        return [Draft(h.id, "for", "weak", [prof.id], note + "：多數採用")]
+    if share <= 0.2:
+        return [Draft(h.id, "against", "moderate" if weak else "strong", [prof.id], note + "：很少採用，不是它的策略")]
+    return [Draft(h.id, "none", "weak", [prof.id], note + "：一半左右，不計入證據")]
+
+
+def _adoption(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
+    prof = _onpage(ctx, h)
+    if prof is None:
+        return []
+    n, k = prof.data.get("n_diffed", 0), prof.data.get("adopted_in_window", {}).get(h.dimension, 0)
+    label = strategy.label(h.dimension)
+    if n == 0:
+        return [Draft(h.id, "none", "weak", [prof.id], f"{label}：排名頁沒有可比對的歷史版本，無法判斷採用時間")]
+    note = f"{label}：比對改版前後的 {n} 個排名頁中，{k} 頁在研究期間內才加上"
+    if k >= 2 and k / n >= 0.4:
+        return [Draft(h.id, "for", "moderate", [prof.id], note + "：期間內的策略性改版")]
+    if k >= 1:
+        return [Draft(h.id, "for", "weak", [prof.id], note)]
+    return [Draft(h.id, "none", "weak", [prof.id], note + "：可能是長期做法（不影響它是否為策略）")]
+
+
+def _link(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
+    lp = _latest(ctx, "link_profile", site=h.subject_site)
+    if lp is None:
+        return [Draft(h.id, "none", "weak", [], f"沒有 {h.subject_site} 的反向連結資料，不計入證據")]
+    d, dim = lp.data, h.dimension
+    if dim == "link_growth":
+        growth, new = d.get("growth_ratio"), d.get("new_ref_domains_in_window", 0)
+        if growth is None:
+            return [Draft(h.id, "none", "weak", [lp.id], "反向連結資料沒有首次發現日期，無法判斷成長")]
+        note = f"期間內新增引用網域 {new} 個，平常同長度約 {d.get('baseline_in_same_length', 0):g} 個（{growth:g} 倍）"
+        if growth >= 2 and new >= 5:
+            return [Draft(h.id, "for", "strong", [lp.id], note + "：明顯加速取得連結")]
+        if growth >= 1.5 and new >= 3:
+            return [Draft(h.id, "for", "moderate", [lp.id], note + "：連結成長加快")]
+        if new == 0 or growth < 1:
+            return [Draft(h.id, "against", "moderate", [lp.id], note + "：沒有比平常更積極")]
+        return [Draft(h.id, "none", "weak", [lp.id], note + "：和平常差不多，不計入證據")]
+    if dim == "anchor_keyword":
+        share = (d.get("anchor_share") or {}).get("keyword", 0.0)
+        note = f"錨點文字含關鍵字的連結占 {share:.0%}（{d.get('n_links', 0)} 條）"
+        if share >= 0.5:
+            return [Draft(h.id, "for", "strong", [lp.id], note + "：大量使用關鍵字錨點")]
+        if share >= 0.3:
+            return [Draft(h.id, "for", "moderate", [lp.id], note)]
+        if share <= 0.05:
+            return [Draft(h.id, "against", "moderate", [lp.id], note + "：幾乎沒有關鍵字錨點")]
+        return [Draft(h.id, "none", "weak", [lp.id], note + "：不計入證據")]
+    if dim == "link_to_ranking":
+        share = d.get("share_to_ranking_pages")
+        if share is None:
+            return [Draft(h.id, "none", "weak", [lp.id], "沒有排名資料：無法判斷連結是否指向排名頁")]
+        note = f"指向排名頁的連結占 {share:.0%}"
+        if share >= 0.7:
+            return [Draft(h.id, "for", "strong", [lp.id], note + "：外部連結集中在排名頁")]
+        if share >= 0.4:
+            return [Draft(h.id, "for", "moderate", [lp.id], note)]
+        if share <= 0.1:
+            return [Draft(h.id, "against", "moderate", [lp.id], note + "：連結並沒有指向排名頁")]
+        return [Draft(h.id, "none", "weak", [lp.id], note + "：不計入證據")]
+    return []
+
+
+_EVAL = {"serp_template_share": _serp_share, "template_burst": _burst, "template_change_sample": _sample,
+         "ranking_contrast": _contrast, "ranking_prevalence": _prevalence, "adoption_timing": _adoption,
+         "link_signal": _link}
 
 
 def evaluate(ctx: EpisodeContext, probe: Probe) -> list[Draft]:

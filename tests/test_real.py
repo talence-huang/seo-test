@@ -243,3 +243,79 @@ def test_research_builds_three_profiles(settings, tmp_path, monkeypatch):
     kinds = {p["kind"] for p in observation_digest(r.ctx)["strategy_profiles"]}
     assert kinds == {"onpage_profile", "own_profile", "link_profile"}
     assert any(realsite.OWN in u for u in log) and not any("/cart" in u for u in log)
+
+
+class _Scripted:
+    """測試用的腳本化 LLM（不屬於產品）：依 schema 回固定結構；策略假設依摘要中的輪廓產生，讓整條流程跑到優先行動。"""
+
+    def call(self, role, *, system, user, schema):
+        from seo_intel.llm.types import CallMeta, LLMResult
+
+        name = schema.__name__
+        if name == "GoalOut":
+            out = dict(restated_question="競品策略", goal_type="competitive_strategy", topic_keywords=realsite.KEYWORDS,
+                       focus_domains=[realsite.SITE], window_start="2026-07-03", window_end="2026-10-01",
+                       success_criteria=[])
+        elif name == "PlanOut":
+            out = dict(info_needs=[], rationale="由系統補上必要的資訊需求")
+        elif name == "HypothesesOut":
+            digest = json.loads(user.split("<digest>\n", 1)[1].split("\n</digest>", 1)[0])
+            link = next(p["obs"] for p in digest["strategy_profiles"] if p["kind"] == "link_profile" and not p["own"])
+            hyps = [dict(category="offpage_strategy", statement=f"競品在研究期間積極經營反向連結（{d}）",
+                         subject_site=realsite.SITE, template="", dimension=d, mechanism="外部連結",
+                         prediction="反向連結指標明顯高於平常", falsification="指標和平常差不多", cited_observations=[link],
+                         prior=0.5) for d in ("link_growth", "anchor_keyword")]
+            out = dict(hypotheses=hyps, reasoning_summary="依反向連結輪廓提出")
+        elif name == "ProbePlanOut":
+            out = dict(discriminating_question="免費證據已足夠", probes=[])
+        elif name == "VerifierOut":
+            out = dict(assessment="holds", objections=[], requested_probes=[], summary="量測支持這個假設")
+        elif name == "ReportOut":
+            out = dict(headline="", summary="競品積極經營反向連結 [C1]。", findings=[], excluded=[], caveats=[],
+                       recommendations=["優先經營主題相關網站的引用 [A1]"])
+        else:
+            raise AssertionError(f"沒有準備 {name}")
+        return LLMResult(parsed=schema.model_validate(out), meta=CallMeta(role=role, model="scripted"))
+
+
+def _links_csv(tmp_path):
+    links = tmp_path / "links.csv"
+    rows = "".join(f"https://ref{i}.example.com/p,https://{realsite.SITE}{realsite.GUIDE[i % 4]},高山茶推薦,2026-09-0{i + 1}\n"
+                   for i in range(5))
+    links.write_text("Referring page URL,Target URL,Anchor,First seen\n" + rows
+                     + f"https://old.example.com/p,https://{realsite.SITE}/,茶葉專賣,2025-03-01\n"
+                     + f"https://fan.example.com/p,https://{realsite.OWN}/,自家茶園,2025-05-01\n", encoding="utf-8")
+    return links
+
+
+def test_research_derives_strategies_and_priority_actions(settings, tmp_path, monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    r = run_real({"competitors": [realsite.SITE], "keywords": realsite.KEYWORDS, "serp_source": "serpapi",
+                  "own_site": realsite.OWN, "backlink_paths": [str(_links_csv(tmp_path))]},
+                 settings, lambda d: _Scripted(), run_root=tmp_path / "runs", client=realsite.client([]),
+                 clock=TestClock(), today=TODAY, history=tmp_path / "h.jsonl")
+    st = r.state
+    off = {c.dimension: c for c in st.claims if c.claim_type == "offpage_strategy"}
+    assert st.end_reason == "hypothesis_supported" and set(off) == {"link_growth", "anchor_keyword"}
+    assert all(c.validated for c in off.values()) and off["link_growth"].measure["competitor"] == 5
+    assert [a.dimension for a in st.actions][:2] == ["link_growth", "anchor_keyword"]
+    assert st.actions[0].status == "do" and st.actions[0].own == 0 and st.actions[0].gap == 1.0
+    assert st.report["recommendations"] == ["優先經營主題相關網站的引用 [A1]"] and not st.report["inconclusive_reasons"]
+    md = (r.ctx.run_dir / "report.md").read_text(encoding="utf-8")
+    assert "## 2. Off-page 策略" in md and "| A1 |" in md and "關鍵策略" in md
+
+
+def test_report_explains_why_there_is_no_conclusion(settings, tmp_path, monkeypatch):
+    from seo_intel.llm.types import LLMFatalError
+
+    class NoLLM:
+        def call(self, role, *, system, user, schema):
+            raise LLMFatalError("不呼叫 LLM")
+
+    r = run_real({"competitors": [realsite.SITE], "keywords": realsite.KEYWORDS}, settings, lambda d: NoLLM(),
+                 run_root=tmp_path / "runs", client=realsite.client([]), clock=TestClock(), today=TODAY,
+                 history=tmp_path / "h.jsonl")
+    reasons = r.state.report["inconclusive_reasons"]
+    assert reasons[0].startswith("沒有提出可以檢驗的假設") and any("沒有排名資料" in x for x in reasons)
+    md = (r.ctx.run_dir / "report.md").read_text(encoding="utf-8")
+    assert "## 為什麼沒有結論" in md and "## 資料缺口" in md and "無法研究 Off-page 策略" in md
