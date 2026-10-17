@@ -25,10 +25,28 @@ python -m venv .venv
 
 真實 LLM 呼叫需要 Anthropic API 金鑰：在專案根目錄的 `.env` 填入 `ANTHROPIC_API_KEY=...`（若沒有 `.env`，從 `.env.example` 複製一份）。`.env` 不會被 commit；已存在的系統環境變數優先。可用 `seo-intel config show` 確認是否已讀到金鑰。
 
+## 網頁介面（最簡單的用法）
+
+```powershell
+seo-intel web
+```
+
+瀏覽器會自動打開 `http://127.0.0.1:8765/`（只接受本機連線；Ctrl+C 結束）。
+
+| 分頁 | 可以做什麼 |
+|---|---|
+| 研究 | 選情境、LLM、記憶、預算與世界種子後開始研究；即時看到每一步（點一下展開理由、候選行動與分數、LLM 輸出、HTTP 請求）；逐步模式可按「下一步／連續執行／暫停並存檔」；結束後看結論、假設、限制、學到什麼，開啟完整時間軸，或糾正結論 |
+| 紀錄與核准 | 所有研究紀錄；待核准的請求（附預估）可直接核准或拒絕，Agent 隨即續跑；暫停的研究可繼續 |
+| 記憶 | 經驗庫（狀態、來源、套用成效、程式套用的偏置、稽核軌跡、淘汰）、人工糾偏紀錄、每次研究的成效、M2 範本價值 |
+| 評測 | 執行 Day 1 → 訓練 → Day N → 消融 → 緊縮預算，並瀏覽評測報告 |
+
+網頁與下列指令共用同一套檢查點、trace 與資料庫，兩者可以交替使用。
+
 ## 指令
 
 ```powershell
 seo-intel version          # 版本與 schema 版本
+seo-intel web              # 本機網頁介面（--port 換埠、--no-open 不自動開瀏覽器）
 seo-intel config show      # 目前生效的模型、價格、預算、自治邊界設定
 seo-intel db init          # 建立 data/intel.db
 seo-intel db info          # 資料表與筆數
@@ -88,6 +106,7 @@ src/seo_intel/
   core/            研究迴圈：狀態機、步驟、行動候選、Frontier、預算、PolicyGate、檢查點
   tools/           HTTP 包裝層、萃取、差異、排名、歷史快照、網站探勘
   observe/         即時主控台、trace、資料庫紀錄、timeline.html
+  web/             本機網頁介面（標準庫 HTTP 伺服器 + 單頁前端，無額外套件）
   evals/           評測：確定性評分器、Day 1 / Day N 協定、報告
   memory/          記憶：經驗庫（M1）、URL 價值先驗（M2）、REFLECT 規則、人工糾偏、治理（data/memory.db）
   cli.py           seo-intel 指令

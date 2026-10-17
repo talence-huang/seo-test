@@ -16,7 +16,8 @@ class MemoryStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
+        # 網頁介面在請求執行緒開啟、在背景工作執行緒使用；同一時間只有一個工作使用同一份記憶
+        self.conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         sql = resources.files("seo_intel.memory").joinpath("schema.sql").read_text(encoding="utf-8")
         self.conn.executescript(sql)

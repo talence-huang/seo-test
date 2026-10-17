@@ -66,6 +66,33 @@ def version() -> None:
     console.print(f"seo-intel {__version__}（schema v{SCHEMA_VERSION}）")
 
 
+@app.command()
+def web(
+    port: Annotated[int, typer.Option(help="埠號（只綁定 127.0.0.1）")] = 8765,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open", help="啟動後自動開啟瀏覽器")] = True,
+) -> None:
+    """啟動本機網頁介面：開始研究並即時觀看、核准 / 拒絕、糾正結論、檢視記憶、執行評測。"""
+    import webbrowser
+
+    from seo_intel.web.server import serve
+
+    try:
+        httpd, _ = serve(port)
+    except OSError as e:
+        console.print(f"[red]無法使用埠 {port}[/]：{e}（可用 --port 換一個）")
+        raise typer.Exit(1) from None
+    url = f"http://127.0.0.1:{httpd.server_address[1]}/"
+    console.print(f"網頁介面：[bold]{url}[/]（只接受本機連線；按 Ctrl+C 結束）")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        console.print("已關閉網頁介面")
+    finally:
+        httpd.server_close()
+
+
 @db_app.command("init")
 def db_init(path: DbPath = DEFAULT_DB) -> None:
     """建立或升級資料庫。"""

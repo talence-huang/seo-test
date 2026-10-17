@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="token" content="__TOKEN__">
+<title>SEO 研究 Agent</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">SEO 競爭情報研究 Agent <span class="muted" id="version"></span></div>
+  <nav class="tabs" role="tablist">
+    <button data-tab="research" class="active">研究</button>
+    <button data-tab="episodes">紀錄與核准 <span class="badge" id="pending-badge" hidden></span></button>
+    <button data-tab="memory">記憶</button>
+    <button data-tab="eval">評測</button>
+  </nav>
+  <div class="statusline" id="statusline"></div>
+</header>
+
+<main>
+  <!-- 研究 -->
+  <section id="tab-research" class="tab">
+    <div class="layout">
+      <form id="research-form" class="card form">
+        <h2>開始一次研究</h2>
+        <label>情境
+          <select name="scenario" id="scenario"></select>
+        </label>
+        <p class="hint" id="scenario-desc"></p>
+        <fieldset>
+          <legend>LLM</legend>
+          <label class="inline"><input type="radio" name="llm" value="fake" checked> 假 LLM（免費、可重現）</label>
+          <label class="inline"><input type="radio" name="llm" value="live" id="llm-live"> 真實 Opus（每次約 US$0.3）</label>
+          <p class="hint" id="key-hint"></p>
+        </fieldset>
+        <fieldset>
+          <legend>記憶</legend>
+          <select name="memory" id="memory-mode">
+            <option value="default">使用預設記憶（會學習）</option>
+            <option value="none">不使用記憶（Day 1）</option>
+            <option value="custom">指定記憶檔…</option>
+          </select>
+          <input name="memory_path" id="memory-path" placeholder="例如 data/exp1.db" hidden>
+          <label class="inline"><input type="checkbox" name="ablate" value="M1"> 關閉 M1 經驗庫</label>
+          <label class="inline"><input type="checkbox" name="ablate" value="M2"> 關閉 M2 範本價值</label>
+        </fieldset>
+        <details>
+          <summary>進階：預算與世界種子</summary>
+          <label>抓取上限 <input type="number" name="max_fetches" min="5" placeholder="預設 300"></label>
+          <label>LLM 花費上限（US$） <input type="number" name="max_llm_usd" step="0.01" min="0.01" placeholder="預設 2.00"></label>
+          <label>世界種子 <input type="number" name="seed" placeholder="預設為情境的種子"></label>
+          <p class="hint">把抓取上限壓低（例如 30），就能看到 Agent 預算用盡時停下來請你核准。</p>
+        </details>
+        <label class="inline"><input type="checkbox" name="step" id="step-mode"> 逐步模式（每一步都停下來，由你按「下一步」）</label>
+        <button type="submit" class="primary" id="start-btn">開始研究</button>
+        <p class="error" id="research-error" hidden></p>
+      </form>
+
+      <div class="card run" id="run">
+        <div class="empty" id="run-empty">
+          <h2>研究過程會即時顯示在這裡</h2>
+          <p>每一步都看得到：Agent 做了什麼、為什麼這樣做（候選行動與分數）、看到了什麼、花了多少。</p>
+          <ol>
+            <li>左邊選一個情境（例如 s1），按「開始研究」。</li>
+            <li>想看清楚每一步，就勾選「逐步模式」。</li>
+            <li>結束後可以看結論、打開完整時間軸，或糾正它的結論。</li>
+          </ol>
+        </div>
+        <div id="run-body" hidden>
+          <div class="run-head">
+            <div>
+              <div class="title" id="run-title"></div>
+              <div class="muted" id="run-question"></div>
+            </div>
+            <span class="pill" id="run-status"></span>
+          </div>
+          <div class="meters" id="run-meters"></div>
+          <div class="controls" id="step-controls" hidden>
+            <button id="btn-next" class="primary">下一步</button>
+            <button id="btn-run">連續執行到結束</button>
+            <button id="btn-pause">暫停並存檔</button>
+            <span class="hint">逐步模式：Agent 正在等你。</span>
+          </div>
+          <div class="controls" id="run-controls" hidden>
+            <button id="btn-pause-run">暫停並存檔</button>
+          </div>
+          <ol class="steps" id="steps"></ol>
+          <div id="run-result"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 紀錄與核准 -->
+  <section id="tab-episodes" class="tab" hidden>
+    <div class="card">
+      <h2>待核准的請求</h2>
+      <div id="approvals-list"></div>
+    </div>
+    <div class="card">
+      <div class="row-between"><h2>研究紀錄</h2><button id="refresh-episodes">重新整理</button></div>
+      <div class="table-wrap"><table id="episodes-table"></table></div>
+    </div>
+    <div class="card" id="episode-detail" hidden></div>
+  </section>
+
+  <!-- 記憶 -->
+  <section id="tab-memory" class="tab" hidden>
+    <div class="card">
+      <div class="row-between">
+        <h2>記憶</h2>
+        <form id="memory-form" class="inline-form">
+          <input id="memory-file" placeholder="記憶檔（留空＝預設 data/memory.db）" size="40">
+          <button type="submit">載入</button>
+        </form>
+      </div>
+      <p class="hint">M1 經驗庫：Agent 從成功、失敗與你的糾正中學到的經驗；程式會直接套用其中的偏置。M2：哪些網址範本常是答案所在。</p>
+      <div id="memory-body"></div>
+    </div>
+  </section>
+
+  <!-- 評測 -->
+  <section id="tab-eval" class="tab" hidden>
+    <div class="layout">
+      <form id="eval-form" class="card form">
+        <h2>評測：學習有沒有讓 Agent 變好？</h2>
+        <p class="hint">依序執行：學習前（Day 1）→ 在訓練情境學習 → 學習後（Day N）→ 關閉 M1 / M2 的對照 → 緊縮預算。評分只依標準答案與伺服器紀錄。</p>
+        <fieldset>
+          <legend>LLM</legend>
+          <label class="inline"><input type="radio" name="llm" value="fake" checked> 假 LLM（免費，約 2 分鐘）</label>
+          <label class="inline"><input type="radio" name="llm" value="live" id="eval-live"> 真實 Opus（需設定花費上限）</label>
+        </fieldset>
+        <label>每個測試情境的種子數 <input type="number" name="seeds" value="3" min="1" max="10"></label>
+        <label>種子位移 <input type="number" name="test_offset" value="8000" step="1000"></label>
+        <p class="hint">用從沒看過的世界做獨立驗證（研究中的乾淨驗證組是 8000）。</p>
+        <label class="inline"><input type="checkbox" name="quick"> 只跑 Day 1 / 訓練 / Day N（略過消融與緊縮預算）</label>
+        <label id="max-usd-label" hidden>花費上限（US$） <input type="number" name="max_usd" step="0.5" min="1"></label>
+        <button type="submit" class="primary">開始評測</button>
+        <p class="error" id="eval-error" hidden></p>
+        <h3>先前的評測</h3>
+        <ul class="plain" id="eval-list"></ul>
+      </form>
+      <div class="card">
+        <pre class="log" id="eval-log" hidden></pre>
+        <div class="markdown" id="eval-report"><p class="muted">評測報告會顯示在這裡。</p></div>
+      </div>
+    </div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>
