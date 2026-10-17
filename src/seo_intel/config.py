@@ -77,9 +77,10 @@ class PhaseShares(_Strict):
 class BudgetConfig(_Strict):
     max_fetches: int = Field(gt=0)
     max_fetches_per_domain: int = Field(gt=0)
+    max_api_calls: int = Field(gt=0)
     max_llm_usd: float = Field(gt=0)
     max_wall_time_s: int = Field(gt=0)
-    max_steps: int = Field(gt=0)
+    max_actions: int = Field(gt=0)
     phases: PhaseShares
 
 

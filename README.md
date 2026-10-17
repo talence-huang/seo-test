@@ -10,7 +10,8 @@
 |---|---|---|
 | 0 | 專案骨架、SQLite schema、LLM client（結構化輸出、成本計量、FakeLLM、錄製重播） | 完成（Haiku 與 Opus 角色皆已真實驗證） |
 | 1 | SimWeb 研究環境（6 個情境、反爬行為、陷阱、注入頁、模擬排名與歷史、自動推導標準答案） | 完成 |
-| 2–6 | 研究迴圈、假設證據、學習、自治邊界、評測 | 未開始 |
+| 2 | 研究迴圈與可觀察性（狀態機、工具層、Frontier、預算、PolicyGate 基本版、即時主控台、trace、timeline、暫停續跑） | 完成 |
+| 3–6 | 假設證據、學習、自治邊界、評測 | 未開始 |
 
 ## 安裝
 
@@ -32,6 +33,11 @@ seo-intel llm ping         # 一次真實 API 呼叫，顯示 token 與成本
 seo-intel simweb list                    # 列出研究情境
 seo-intel simweb inspect --scenario s1   # 情境細節、標準答案、植入效應可觀察性
 seo-intel simweb fetch -s s1 <網址>      # 在模擬世界中抓取一個網址
+seo-intel research --scenario s1 --step  # 逐步觀察研究迴圈（--llm fake 免費）
+seo-intel research resume <episode>      # 從檢查點續跑
+seo-intel trace list                     # 列出 episode
+seo-intel trace show <episode>           # 終端機重播完整時間軸
+seo-intel trace html <episode>           # 產生 runs/<episode>/timeline.html
 ```
 
 ## 測試
@@ -60,7 +66,10 @@ config/            模型、價格、預算、自治邊界設定
 src/seo_intel/
   config.py        設定載入與驗證
   store/           SQLite schema 與存取層
-  llm/             Anthropic client、成本計量、FakeLLM、錄製重播
+  llm/             Anthropic client、成本計量、FakeLLM、錄製重播、角色 prompt
+  core/            研究迴圈：狀態機、步驟、行動候選、Frontier、預算、PolicyGate、檢查點
+  tools/           HTTP 包裝層、萃取、差異、排名、歷史快照、網站探勘
+  observe/         即時主控台、trace、資料庫紀錄、timeline.html
   cli.py           seo-intel 指令
 src/simweb/        研究環境（獨立套件）：世界產生器、反爬行為、模擬排名與歷史 API
 evals/scenarios/   6 個研究情境（4 訓練 / 2 測試）

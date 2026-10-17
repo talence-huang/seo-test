@@ -1,13 +1,14 @@
 # 每個 episode 的預算硬上限與階段預留（見 docs/04-research-loop.md §4.5）
 
-max_fetches: 300
+max_fetches: 300              # 對網站的 HTTP 請求（含 robots、sitemap、重試）
 max_fetches_per_domain: 150
+max_api_calls: 200            # 排名 / 歷史快照 API 呼叫
 max_llm_usd: 2.00
-max_wall_time_s: 1200
-max_steps: 200
+max_wall_time_s: 1200         # 以環境時鐘計（SimWeb 為虛擬時鐘）
+max_actions: 300              # 工具行動數；迴圈另有 10 倍的步驟數安全上限
 
-phases:            # 比例總和必須為 1；verification 預留不可被前面階段動用
-  discovery: 0.10
-  sampling: 0.40
-  targeted: 0.35
-  verification: 0.15
+phases:            # 抓取額度的階段預留（累進制：前面沒用完的額度順延到後面）
+  discovery: 0.10  # 排名掃描、robots、sitemap
+  sampling: 0.40   # 範本分層抽樣
+  targeted: 0.35   # 高價值範本的定向抓取與歷史比對
+  verification: 0.15   # 保留給驗證（Phase 3），前面階段不可動用

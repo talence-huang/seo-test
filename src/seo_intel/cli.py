@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Annotated
 
@@ -22,17 +23,31 @@ db_app = typer.Typer(help="資料庫", no_args_is_help=True)
 config_app = typer.Typer(help="設定", no_args_is_help=True)
 llm_app = typer.Typer(help="LLM 連線", no_args_is_help=True)
 simweb_app = typer.Typer(help="SimWeb 研究環境", no_args_is_help=True)
+research_app = typer.Typer(help="執行研究 episode（seo-intel research --scenario s1）")
+trace_app = typer.Typer(help="檢視研究過程", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(config_app, name="config")
 app.add_typer(llm_app, name="llm")
 app.add_typer(simweb_app, name="simweb")
+app.add_typer(research_app, name="research")
+app.add_typer(trace_app, name="trace")
 
 console = Console()
 DbPath = Annotated[Path, typer.Option("--path", help="SQLite 檔案路徑")]
 
 
+def _ensure_utf8_output() -> None:
+    """輸出被導向檔案或管線時，Windows 會改用系統編碼（例如 cp950）；改為 UTF-8，避免特殊字元造成崩潰。"""
+    import sys
+
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure") and (stream.encoding or "").lower().replace("-", "") != "utf8":
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 @app.callback()
 def _startup() -> None:
+    _ensure_utf8_output()
     load_env_file()
 
 
@@ -80,8 +95,8 @@ def config_show() -> None:
 
     b = s.budget
     console.print(
-        f"[bold]預算[/]：抓取 {b.max_fetches} 頁（每網域 {b.max_fetches_per_domain}）· "
-        f"LLM US${b.max_llm_usd:.2f} · {b.max_wall_time_s}s · {b.max_steps} 步"
+        f"[bold]預算[/]：抓取 {b.max_fetches} 次（每網域 {b.max_fetches_per_domain}）· API {b.max_api_calls} 次 · "
+        f"LLM US${b.max_llm_usd:.2f} · {b.max_wall_time_s}s · {b.max_actions} 個行動"
     )
     ph = b.phases
     console.print(
@@ -242,6 +257,218 @@ def simweb_fetch(
     flags = sim.server.log.records[-1].flags if sim.server.log.records else ()
     if flags:
         console.print(f"[yellow]環境紀錄的旗標[/]：{', '.join(flags)}")
+
+
+# ---------- 研究 episode ----------
+
+LlmOpt = Annotated[str, typer.Option("--llm", help="live：真實 API（自動錄製）；fake：確定性假規劃器（免費）；replay：重播錄製檔")]
+StepOpt = Annotated[bool, typer.Option("--step", help="逐步模式：每一步暫停，可隨時存檔離開")]
+QuietOpt = Annotated[bool, typer.Option("--quiet", help="不輸出即時步驟")]
+VerboseOpt = Annotated[bool, typer.Option("--verbose", help="也顯示例行的「繼續」判斷")]
+
+
+class StepPrompter:
+    """--step 模式：每一步後等待輸入。Enter 繼續；c 連續執行到結束；q 暫停並存檔。"""
+
+    def __init__(self, con: Console) -> None:
+        self.console = con
+        self.running = False
+
+    def __call__(self, record) -> bool:
+        quiet = record.step == "DECIDE_NEXT" and record.decision.get("decision") == "continue"
+        if self.running or quiet:
+            return True
+        answer = self.console.input("[dim]       Enter 繼續｜c 連續執行到結束｜q 暫停並存檔[/] ").strip().lower()
+        if answer == "c":
+            self.running = True
+        return answer != "q"
+
+
+def _make_llm(mode: str, settings, run_dir: Path, cassette: Path | None):
+    from seo_intel.llm import AnthropicLLM, RecordingLLM, ReplayLLM
+    from seo_intel.llm.fake_planner import fake_llm
+
+    if mode == "fake":
+        return fake_llm(settings.models)
+    if mode == "replay":
+        return ReplayLLM(cassette or run_dir / "llm_cassette.jsonl")
+    if mode == "live":
+        return RecordingLLM(AnthropicLLM(settings.models), run_dir / "llm_cassette.jsonl")
+    raise typer.BadParameter(f"未知的 --llm 模式：{mode}")
+
+
+def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path, resumed: bool) -> None:
+    from seo_intel.core.loop import ResearchLoop
+    from seo_intel.observe.console import ConsoleObserver
+    from seo_intel.observe.store import DbRecorder
+    from seo_intel.observe.trace import TraceWriter
+
+    st, run_dir = ectx.state, ectx.run_dir
+    db = Database(db_path)
+    recorder = DbRecorder(db, st)
+    if resumed:
+        recorder.truncate(st.seq)
+    observers = [TraceWriter(run_dir / "trace.jsonl"), recorder]
+    if not quiet:
+        observers.insert(0, ConsoleObserver(console, verbose))
+    console.rule(f"[bold]Episode {st.id}{'（續跑）' if resumed else ''}")
+    console.print(f"[bold]任務[/]：{st.task.question}")
+    console.print(f"自家站 {st.task.own_site} · 競品 {', '.join(st.task.competitors)} · 今天 {st.task.today}\n")
+    loop = ResearchLoop(ectx, observers, step_hook=StepPrompter(console) if step else None)
+    try:
+        loop.run()
+    finally:
+        db.close()
+        _write_artifacts(ectx, sim)
+    console.rule("[bold]結果")
+    env = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
+    viol = env["violations"]
+    console.print(f"狀態 [bold]{st.status}[/]（{st.end_reason or ('已暫停' if loop.paused else '—')}）")
+    console.print(f"環境判定違規：{'[green]0[/]' if not any(viol.values()) else f'[red]{viol}[/]'}"
+                  f"（SimWeb 伺服器紀錄，本次執行期間）")
+    console.print(f"時間軸：{run_dir / 'timeline.html'}")
+    console.print(f"trace：{run_dir / 'trace.jsonl'}")
+    if loop.paused or st.status == "running":
+        console.print(f"[yellow]已暫停[/]，續跑：seo-intel research resume {st.id}")
+    if st.status == "waiting_approval":
+        console.print(f"[yellow]等待人工核准[/]：{st.approval_request['reason']}（核准指令於 Phase 5 實作）")
+
+
+def _write_artifacts(ectx, sim) -> None:
+    from seo_intel.observe.timeline import render_timeline
+    from seo_intel.observe.trace import read_trace
+
+    run_dir = ectx.run_dir
+    log = sim.server.log
+    env = {"violations": log.violations(), "flags": dict(log.flag_counts()), "requests_by_host": dict(log.by_host())}
+    (run_dir / "environment.json").write_text(json.dumps(env, ensure_ascii=False, indent=2), encoding="utf-8")
+    html = render_timeline(read_trace(run_dir / "trace.jsonl"), ectx.state.model_dump(mode="json"),
+                           ectx.frontier.to_dict() if ectx.frontier else None, env)
+    (run_dir / "timeline.html").write_text(html, encoding="utf-8")
+
+
+@research_app.callback(invoke_without_command=True)
+def research(
+    typer_ctx: typer.Context,
+    scenario: Annotated[str | None, typer.Option("--scenario", "-s", help="情境 ID，例如 s1")] = None,
+    llm: LlmOpt = "live",
+    cassette: Annotated[Path | None, typer.Option(help="--llm replay 時使用的錄製檔")] = None,
+    step: StepOpt = False,
+    quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
+    path: DbPath = DEFAULT_DB,
+) -> None:
+    """在 SimWeb 情境中執行一個研究 episode。"""
+    if typer_ctx.invoked_subcommand:
+        return
+    if scenario is None:
+        console.print("請指定 --scenario（例如 --scenario s1），或使用 seo-intel research resume <episode>")
+        raise typer.Exit(1)
+    from seo_intel.core.episode import RUNS_DIR, build_context, new_state
+    from seo_intel.core.models import TaskInput
+    from simweb import build
+
+    settings = get_settings()
+    sim = build(scenario)
+    g = sim.spec.goal
+    task = TaskInput(scenario=scenario, question=g.question, own_site=g.own_site, competitors=list(g.competitors),
+                     today=sim.spec.now, period_hint=g.window)
+    state = new_state(task, sim.clock)
+    run_dir = RUNS_DIR / state.id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, cassette), sim.client(), sim.clock, run_dir)
+    _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
+
+
+@research_app.command("resume")
+def research_resume(
+    episode_id: Annotated[str, typer.Argument(help="Episode ID")],
+    llm: LlmOpt = "live",
+    step: StepOpt = False,
+    quiet: QuietOpt = False,
+    verbose: VerboseOpt = False,
+    path: DbPath = DEFAULT_DB,
+) -> None:
+    """從檢查點續跑一個暫停中的 episode。"""
+    from seo_intel.core.episode import RUNS_DIR, build_context, load_checkpoint
+    from seo_intel.observe.trace import truncate_trace
+    from simweb import VirtualClock, build
+
+    run_dir = RUNS_DIR / episode_id
+    if not (run_dir / "checkpoint.json").is_file():
+        console.print(f"[red]找不到檢查點[/]：{run_dir}")
+        raise typer.Exit(1)
+    state, frontier = load_checkpoint(run_dir)
+    if state.status in ("done", "failed"):
+        console.print(f"Episode 已結束（{state.status}），無需續跑")
+        raise typer.Exit(0)
+    if state.status == "waiting_approval":
+        console.print(f"[yellow]Episode 等待人工核准[/]：{state.approval_request['reason']}（核准指令於 Phase 5 實作）")
+        raise typer.Exit(1)
+    settings = get_settings()
+    sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at))
+    truncate_trace(run_dir / "trace.jsonl", state.seq)
+    ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, None), sim.client(), sim.clock, run_dir,
+                         frontier)
+    _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=True)
+
+
+# ---------- 檢視研究過程 ----------
+
+def _run_dir(episode_id: str) -> Path:
+    from seo_intel.core.episode import RUNS_DIR
+
+    d = RUNS_DIR / episode_id
+    if not d.is_dir():
+        console.print(f"[red]找不到 episode[/]：{episode_id}（可用 seo-intel trace list 查看）")
+        raise typer.Exit(1)
+    return d
+
+
+@trace_app.command("list")
+def trace_list() -> None:
+    """列出所有 episode。"""
+    from seo_intel.core.episode import RUNS_DIR, load_checkpoint
+
+    t = Table("Episode", "情境", "狀態", "結束原因", "步驟", "抓取", "LLM US$", title="研究 episode")
+    for d in sorted(RUNS_DIR.glob("E-*"), reverse=True):
+        if not (d / "checkpoint.json").is_file():
+            continue
+        st, _ = load_checkpoint(d)
+        t.add_row(st.id, st.task.scenario or "—", st.status, st.end_reason or "—", str(st.seq),
+                  str(st.budget.fetches), f"{st.budget.llm_usd:.4f}")
+    console.print(t)
+
+
+@trace_app.command("show")
+def trace_show(
+    episode_id: Annotated[str, typer.Argument(help="Episode ID")],
+    verbose: VerboseOpt = False,
+) -> None:
+    """在終端機重播一個 episode 的完整時間軸。"""
+    from seo_intel.observe.console import ConsoleObserver
+    from seo_intel.observe.trace import read_trace
+
+    observer = ConsoleObserver(console, verbose)
+    for record in read_trace(_run_dir(episode_id) / "trace.jsonl"):
+        observer.render(record)
+
+
+@trace_app.command("html")
+def trace_html(episode_id: Annotated[str, typer.Argument(help="Episode ID")]) -> None:
+    """重新產生 timeline.html。"""
+    from seo_intel.core.episode import load_checkpoint
+    from seo_intel.observe.timeline import render_timeline
+    from seo_intel.observe.trace import read_trace
+
+    d = _run_dir(episode_id)
+    state, frontier = load_checkpoint(d)
+    env_path = d / "environment.json"
+    env = json.loads(env_path.read_text(encoding="utf-8")) if env_path.is_file() else None
+    html = render_timeline(read_trace(d / "trace.jsonl"), state.model_dump(mode="json"),
+                           frontier.to_dict() if frontier else None, env)
+    (d / "timeline.html").write_text(html, encoding="utf-8")
+    console.print(f"已產生：{d / 'timeline.html'}")
 
 
 if __name__ == "__main__":

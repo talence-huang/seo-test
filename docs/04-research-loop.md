@@ -80,28 +80,31 @@ stateDiagram-v2
 
 目標：「為什麼自家站在『長照保險』群組排名下滑？」
 
-| InfoNeed | 問題 | 工具 | 解答條件 |
+資訊需求的種類（`kind`）由 LLM 從固定清單中選擇，程式再把每種需求對應到固定的行動：
+
+| kind | 問題 | 行動 | 程式判定「已解答」的條件 |
 |---|---|---|---|
-| N1 | 哪些查詢、頁面下滑？何時開始？ | `rank_query` | 找到下滑起始日與受影響查詢 |
-| N2 | 同期哪個競品取代我們？ | `rank_query`（競品排名維度） | 列出取代者 |
-| N3 | 取代者的頁面改了什麼？ | `sitemap`、`history`、`fetch` + `extract` + `diff` | 取得變動前後差異 |
-| N4 | 是否為全站性因素？ | `rank_query`（非重疊查詢當對照組）、`stats` | 對照組結果已計算 |
+| `rank_change` | 目標網域在主題查詢上的排名何時、變化多少？ | `rank_scan`（主題） | 所有目標網域都已掃描 |
+| `control_check` | 自家站其他主題是否同時變化？（排除全站性因素） | `rank_scan`（對照組） | 已掃描 |
+| `serp_competitors` | 誰在主題查詢上取代了自家站？ | `serp_scan` | 已比較事件前後的 SERP |
+| `site_inventory` | 競品有哪些範本、哪些近期更新？ | `discover` | 所有目標網域都已探勘 |
+| `page_changes` | 競品主題頁面改了什麼？ | `fetch` → `history_diff` | 同一範本累積 3 頁顯著變動或新增（優先 SERP 上升者的網域） |
 
 ---
 
 ## 3. 工具
 
-所有工具實作 `Tool.run(args) -> ToolResult | ToolError`，並經過共同包裝：`RobotsGuard`（robots / crawl-delay）、`RateLimiter`（每網域 1 req/2s）、`Retry`（僅 429 / 5xx / 逾時，遵守 `Retry-After`）、`CircuitBreaker`、`Cache`、`CostMeter`。
+所有對外請求都經過唯一出口 `HttpToolkit`（`tools/http.py`），依序套用：快取 → robots 檢查 → 斷路器 → 預算 → 速率限制（policy 與 crawl-delay 取較大者）→ 請求 → 重試（僅 429 / 5xx / 逾時，遵守 `Retry-After`）。每次 HTTP 嘗試都記錄在 trace。
 
-| 工具 | 用途 | 成本 |
+迴圈中的行動（`Action.tool`）與其使用的工具：
+
+| 行動 | 內容 | 成本 |
 |---|---|---|
-| `robots` / `sitemap` | 一次取得數萬 URL 與 `lastmod`，不必逐頁抓 | 極低 |
-| `fetch` | 抓取單頁 | 1 次抓取額度 |
-| `extract` | HTML → title、H1–H3、字數、schema、連結、日期 | 本地，0 token |
-| `diff` | 兩個頁面版本的結構化差異 | 本地 |
-| `history` | 頁面歷史版本（SimWeb 中模擬 Wayback） | 1 次抓取額度 |
-| `rank_query` | 查詢 × 網站 × 日期的排名（SimWeb 中模擬 GSC / SERP） | 免費 |
-| `stats` | 對照組比較、事件前後比較 | 本地 |
+| `rank_scan` | 主題或對照組查詢的排名時間序列 → `stats` 計算變化量與起始日 | API 呼叫（每查詢 1 次） |
+| `serp_scan` | 變化最大的查詢在事件前後的 SERP → 找出上升者與其排名網址 | API 呼叫 |
+| `discover` | robots → sitemap index → 子 sitemap，一次取得數萬 URL 與 `lastmod` | 約 10 次抓取 |
+| `fetch` | 抓取單頁 → `extract` 確定性萃取（title、H1/H2、字數、schema、FAQ、表格、日期、連結、注入掃描） | 1 次抓取 |
+| `history_diff` | 歷史快照（SimWeb 中模擬 Wayback）→ 與目前版本 `diff`，變動類型詞彙與評測標準答案一致 | 2 次 API 呼叫 |
 
 ---
 
@@ -153,17 +156,20 @@ score(u) =  w_rel   · Relevance(u, goal)      # slug / 錨點文字與目標關
 
 | 硬上限 | 預設 |
 |---|---|
-| `max_fetches` | 300 頁 / episode |
+| `max_fetches` | 300 次 / episode（每網域 150 次） |
+| `max_api_calls` | 200 次（排名、歷史快照 API） |
 | `max_llm_usd` | US$2.00 / episode（依 `response.usage` × 價格表即時累計） |
-| `max_wall_time` | 20 分鐘 |
-| `max_steps` | 200 |
+| `max_wall_time_s` | 1,200 秒（環境時鐘；SimWeb 為虛擬時鐘，LLM 延遲也計入） |
+| `max_actions` | 300 個工具行動；迴圈另有 10 倍的步驟數安全上限 |
 
-| 階段預留 | 比例 |
-|---|---|
-| Discovery | 10% |
-| Sampling | 40% |
-| Targeted | 35% |
-| Verification | 15%（前面階段不可動用） |
+| 階段預留（累進制） | 比例 | 累計抓取上限 |
+|---|---|---|
+| Discovery | 10% | 30 |
+| Sampling | 40% | 150 |
+| Targeted | 35% | 255 |
+| Verification | 15% | 300（前面階段不可動用） |
+
+前面階段沒用完的額度順延到後面，但驗證額度永遠保留。
 
 ### 4.6 LLM 角色與成本
 
@@ -175,7 +181,9 @@ score(u) =  w_rel   · Relevance(u, goal)      # slug / 錨點文字與目標關
 - 全部以 `messages.parse()` + Pydantic schema 取得結構化輸出。
 - Prompt caching：固定的 system prompt 放最前，變動內容放最後；以 `usage.cache_read_input_tokens` 驗證。
 - 檢查 `stop_reason`（`refusal`、`max_tokens`）；Opus 5.5 啟用 server-side fallback。
-- 估算：每個 episode 約 US$1.2（Extractor 約 $0.03、Opus 約 20 次呼叫約 $1.15）；Phase 2 以實測取代。
+- 估算：每個 episode 約 US$1.2（Extractor 約 $0.03、Opus 約 20 次呼叫約 $1.15）。
+- **Phase 2 實測**：s1 一個完整 episode 的 LLM 花費 **US$0.044**（只有 DEFINE_GOAL 與 PLAN_INFO_NEEDS 兩次 Opus 呼叫，第二次起 system prompt 命中快取）。Phase 3 加入假設與驗證後會再實測。
+- **Extractor 在 Phase 2 不啟用**：SimWeb 的頁面內容是合成文字，確定性萃取的特徵（字數、schema、FAQ、章節、日期）已足以判斷；加上 LLM 摘要只增加成本，不增加資訊。
 
 ---
 
@@ -249,9 +257,25 @@ seo-intel research --scenario s1 --step
 ```
 
 ```bash
+seo-intel research --scenario s1 --llm fake
+```
+
+```bash
+seo-intel research resume <episode_id>
+```
+
+```bash
+seo-intel trace list
+```
+
+```bash
 seo-intel trace show <episode_id>
 ```
 
 ```bash
 seo-intel trace html <episode_id>
 ```
+
+- `--step`：每一步後等待輸入（Enter 繼續、`c` 連續執行到結束、`q` 暫停並存檔）。暫停只會發生在「安全點」：工具結果尚未解析前不會暫停。
+- `--llm fake`：確定性假規劃器，免費、可重現；`--llm live`（預設）自動把 LLM 呼叫錄製到 `runs/<id>/llm_cassette.jsonl`，可用 `--llm replay --cassette <檔案>` 重播。
+- 每個 episode 的產物都在 `runs/<id>/`：`trace.jsonl`、`checkpoint.json`、`timeline.html`、`summary.json`、`environment.json`（SimWeb 伺服器判定的違規，非 Agent 自報）。

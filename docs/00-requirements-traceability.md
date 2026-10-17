@@ -6,13 +6,13 @@
 
 | 需求 | 設計 | 模組 | 觀察 / 驗證 | 狀態 |
 |---|---|---|---|---|
-| 不得是黑盒子 | [04 §1、§6](04-research-loop.md) | `core/loop.py`、`observe/` | 即時主控台、`--step`、`timeline.html` | ⬜ |
-| 定義目標 → 決定需要資訊 | `DEFINE_GOAL`、`PLAN_INFO_NEEDS` | `core/steps/` | trace 中的 `ResearchGoal`、`InfoNeed[]` | ⬜ |
-| 調用 Tool → 解析結果 | `SELECT_ACTION`、`EXECUTE_TOOL`、`PARSE_RESULT` | `core/steps/`、`tools/` | 每個行動的評分明細與觀察 ID | ⬜ |
-| 形成假設 → 尋找客觀證據 | `FORM_HYPOTHESES`、`SEEK_EVIDENCE` | `core/beliefs.py` | 假設、鑑別行動 | ⬜ |
-| 修正推論 → 決定下一步 | `REVISE_BELIEFS`、`DECIDE_NEXT` | `core/beliefs.py`、`controller.py` | 信心度曲線、結束理由 | ⬜ |
-| 成本控制：數萬頁中決定優先抓取 | [04 §4](04-research-loop.md) | `core/frontier.py`、`budget.py` | 2 萬頁 SimWeb 網站；浪費率指標 | ⬜ |
-| 時間 / Token / API 限制 | [04 §4.5–4.6](04-research-loop.md) | `core/budget.py`、`llm/client.py` | 預算曲線；上限不可突破測試 | ⬜ |
+| 不得是黑盒子 | [04 §1、§6](04-research-loop.md) | `core/loop.py`、`observe/` | 即時主控台、`--step`、`trace show`、`timeline.html` | ✅ |
+| 定義目標 → 決定需要資訊 | `DEFINE_GOAL`、`PLAN_INFO_NEEDS` | `core/steps.py`、`llm/roles.py` | trace 中的 `ResearchGoal`、`InfoNeed[]` 與 LLM 結構化輸出 | ✅ |
+| 調用 Tool → 解析結果 | `SELECT_ACTION`、`EXECUTE_TOOL`、`PARSE_RESULT` | `core/steps.py`、`core/actions.py`、`tools/` | 每個行動的評分明細、HTTP 請求、觀察 ID | ✅ |
+| 形成假設 → 尋找客觀證據 | `FORM_HYPOTHESES`、`SEEK_EVIDENCE` | `core/beliefs.py` | 假設、鑑別行動 | ⬜ Phase 3 |
+| 修正推論 → 決定下一步 | `REVISE_BELIEFS`、`DECIDE_NEXT` | `core/beliefs.py`、`core/steps.py` | 信心度曲線、結束理由 | 🔄 `DECIDE_NEXT` 完成；`REVISE_BELIEFS` 於 Phase 3 |
+| 成本控制：數萬頁中決定優先抓取 | [04 §4](04-research-loop.md) | `core/frontier.py`、`core/budget.py` | 2 萬頁網站只抓 57 次即找到答案；timeline 範本統計 | ✅ |
+| 時間 / Token / API 限制 | [04 §4.5–4.6](04-research-loop.md) | `core/budget.py`、`llm/anthropic_client.py` | 預算曲線；所有情境驗證額度未被動用（測試） | ✅ |
 | 框架選擇說明 | [02 §3](02-seo-intel-agent-design.md) | — | — | ✅ |
 
 ## B. Memory & Learning

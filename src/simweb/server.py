@@ -89,6 +89,7 @@ class SimWebServer:
         url = request.url
         host, path = url.host, url.path
         params = dict(url.params)
+        arrival = self.clock.now()  # 以抵達時間判斷請求間隔，網路延遲不影響判定
         self.clock.sleep(0.05 + 0.25 * unit(self.w.seed, str(url), "latency"))  # 模擬網路延遲
         if host == RANK_HOST:
             status, body, ctype = self._rank_api(path, params)
@@ -99,7 +100,7 @@ class SimWebServer:
         site = self.w.sites.get(host)
         if site is None:
             raise httpx.ConnectError(f"無法解析主機：{host}", request=request)
-        return self._site(request, site, path, params)
+        return self._site(request, site, path, params, arrival)
 
     def _respond(self, request: httpx.Request, status: int, body: str, ctype: str,
                  flags: tuple[str, ...] = (), headers: dict[str, str] | None = None) -> httpx.Response:
@@ -110,14 +111,14 @@ class SimWebServer:
 
     # ---------- 網站 ----------
 
-    def _site(self, request: httpx.Request, site: SiteModel, path: str, params: dict[str, str]) -> httpx.Response:
+    def _site(self, request: httpx.Request, site: SiteModel, path: str, params: dict[str, str],
+              now: float) -> httpx.Response:
         flags: list[str] = []
-        now = self.clock.now()
         last = self._last.get(site.domain)
         self._last[site.domain] = now
         if last is not None:
             gap = now - last
-            if gap < site.spec.crawl_delay:
+            if gap < site.spec.crawl_delay - 1e-6:   # 容忍浮點誤差
                 flags.append("crawl_delay_violation")
             if gap < self.min_interval:
                 flags.append("rate_limited")
@@ -225,7 +226,7 @@ class SimWebServer:
         try:
             if path == "/v1/queries":
                 site = self._site_param(params)
-                rows = [{"query": q, "cluster": c} for q, c in self.rank.queries()]
+                rows = [{"query": q} for q, _ in self.rank.queries()]  # 如同 GSC，不提供主題分群
                 return 200, json.dumps({"site": site, "queries": rows}), JSON
             if path == "/v1/series":
                 site = self._site_param(params)
