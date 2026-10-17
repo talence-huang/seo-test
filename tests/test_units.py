@@ -6,17 +6,18 @@
 import json
 import threading
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
-from seo_intel.core import approvals, beliefs
+from seo_intel.core import approvals, beliefs, probes
 from seo_intel.core.budget import BudgetLedger
 from seo_intel.core.claims import validate_citations
 from seo_intel.core.episode import build_context, new_state
 from seo_intel.core.frontier import Frontier, detect_trap, template_key
-from seo_intel.core.models import Action, BudgetState, EpisodeState, EvidenceItem, Phase
+from seo_intel.core.models import Action, BudgetState, EpisodeState, EvidenceItem, Hypothesis, Phase, Probe
 from seo_intel.memory import priors
 from seo_intel.memory.models import Bias, Lesson
 from seo_intel.memory.reflect import maybe_retire
@@ -188,6 +189,38 @@ def test_log_odds_and_report_validation():
     assert cleaned["recommendations"] == [] and stats["instructions_removed"] == 1
 
 
+@pytest.mark.parametrize("changed, direction", [(5, "for"), (0, "against")])
+def test_change_sample_probe_tests_against_background_rate(changed, direction):
+    st = EpisodeState(id="E-1", task=build_task({"competitors": ["a.tw"], "keywords": ["k"], "resolve": False}, today=TODAY))
+    st.hypotheses = [Hypothesis(id="H1", round=1, category="competitor_content_change", statement="s", subject_site="a.tw",
+                                template="a.tw/guide/{slug}", prediction="p", falsification="f", prior=0.5, posterior=0.5)]
+    urls = [f"https://a.tw/guide/page-{i}-x/" for i in range(8)]
+    st.probes = [Probe(id="P1", kind="template_change_sample", hypothesis_ids=["H1"], sample=urls, status="executed")]
+    st.fetched = {u: {"status": 200, "evidence": True, "diff_status": "ok", "change": "diff" if i < changed else None}
+                  for i, u in enumerate(urls)}
+    st.add_observation("site_inventory", "inv", {"domain": "a.tw", "templates": [
+        {"template": "guide/{slug}", "n_urls": 100, "n_recent": 5, "recent_share": 0.05}]})
+    drafts = probes.evaluate(SimpleNamespace(state=st), st.probes[0])
+    assert [d.direction for d in drafts] == [direction]
+
+
+def test_missing_lastmod_means_unknown_not_unchanged():
+    fr = Frontier(["k"], (date(2026, 7, 1), TODAY), ["a.tw"])
+    fr.add("https://a.tw/guide/page-1-x/", source="serp")                       # 先從 SERP 加入，sitemap 之後補上日期
+    fr.add("https://a.tw/guide/page-1-x/", source="sitemap", lastmod="2026-09-01")
+    fr.add("https://a.tw/blog/post-1-x/", source="sitemap")
+    stats = {s.key: s for s in fr.stats(["a.tw"])}
+    assert stats["a.tw/guide/{slug}"].n_recent == 1 and stats["a.tw/blog/{slug}"].n_dated == 0
+    st = EpisodeState(id="E-1", task=build_task({"competitors": ["a.tw"], "keywords": ["k"], "resolve": False}, today=TODAY))
+    st.hypotheses = [Hypothesis(id="H1", round=1, category="competitor_content_change", statement="s", subject_site="a.tw",
+                                template="a.tw/blog/{slug}", prediction="p", falsification="f", prior=0.5, posterior=0.5)]
+    st.add_observation("site_inventory", "inv", {"domain": "a.tw", "templates": [
+        {"template": "blog/{slug}", "n_urls": 50, "n_dated": 0, "n_recent": 0, "recent_share": None},
+        {"template": "guide/{slug}", "n_urls": 50, "n_dated": 50, "n_recent": 5, "recent_share": 0.1}]})
+    drafts = probes.evaluate(SimpleNamespace(state=st), Probe(id="P1", kind="template_burst", hypothesis_ids=["H1"]))
+    assert [d.direction for d in drafts] == ["none"]                             # 不是「與全站平常相當」的反證
+
+
 # ---------- 記憶 ----------
 
 @pytest.mark.parametrize("kwargs", [
@@ -217,6 +250,25 @@ def test_memory_store_priors_and_human_lessons(tmp_path):
     copy = MemoryStore(snap)
     assert copy.lesson("L-1").biases[0].path == "/tag/"
     copy.close()
+
+
+@pytest.mark.parametrize("applied, ok, retired", [(5, 2, False), (3, 0, True)])
+def test_retirement_compares_with_episodes_without_the_lesson(tmp_path, applied, ok, retired):
+    """研究本身就難（沒套用經驗時成功率也只有 50%）：成功率 40% 的效率經驗不該被淘汰，0% 才是有害。"""
+    store = MemoryStore(tmp_path / "m.db")
+    for i, success in enumerate([1, 0, 1, 0]):
+        store.record_outcome({"episode_id": f"E-{i}", "success": success, "fetches": 1, "api_calls": 0, "llm_usd": 0,
+                              "lessons": []})
+    lesson = Lesson(id="L-1", signature="s", source="failure", scope={"goal_type": "*"}, trigger="t", lesson="x",
+                    biases=[Bias(type="avoid_path", path="/compare/")], status="active", applied=applied,
+                    applied_success=ok)
+    store.save_lesson(lesson)
+    lines: list[str] = []
+    maybe_retire(store, lesson, "E-9", lines)
+    assert (lesson.status == "retired") == retired
+    if retired:
+        assert "沒套用時的 50%" in lesson.retired_reason
+    store.close()
 
 
 # ---------- 網頁安全 ----------

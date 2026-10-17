@@ -28,7 +28,7 @@ def _inventory_share(st: EpisodeState, tkey: str) -> float:
     for o in reversed(st.observations):
         if o.kind == "site_inventory" and o.data["domain"] == site:
             row = next((r for r in o.data["templates"] if r["template"] == name), None)
-            return row["recent_share"] if row else 0.0
+            return (row["recent_share"] or 0.0) if row else 0.0
     return 0.0
 
 

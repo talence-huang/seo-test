@@ -115,25 +115,29 @@ def run_real(params: dict, settings: Settings, llm_factory: Callable[[Path], LLM
 
 
 def resume_context(run_dir: Path, settings: Settings, llm_factory: Callable[[Path], LLMClient],
-                   memory: MemorySession | None = None) -> EpisodeContext:
-    """從檢查點重建研究環境（run.json 的 env 設定：排名來源與 CSV 路徑）。"""
+                   memory: MemorySession | None = None, *, client=None, clock=None,
+                   history: Path | None = None) -> EpisodeContext:
+    """從檢查點重建研究環境（run.json 的 env 設定：排名來源與 CSV 路徑）。
+    client、clock、history 預設是真實網路、真實時鐘與 data/serp_history.jsonl（評測以模擬傳輸代替）。"""
     from seo_intel.real import env as real
 
     state, frontier = load_checkpoint(run_dir)
     env = load_run_config(run_dir).get("env") or {"serp_source": "none"}
-    return build_context(state, settings, llm_factory(run_dir), real.real_client(), real.RealClock(), run_dir,
-                         frontier, memory=memory, tools=real.tools_factory(env, state.task.today))
+    tools = real.tools_factory(env, state.task.today, **({"history": history} if history else {}))
+    return build_context(state, settings, llm_factory(run_dir), client or real.real_client(), clock or real.RealClock(),
+                         run_dir, frontier, memory=memory, tools=tools)
 
 
 def resume_run(run_dir: Path, settings: Settings, llm_factory: Callable[[Path], LLMClient], *,
                memory: MemorySession | None = None,
                observers: Callable[[EpisodeContext], list[Observer]] | None = None,
-               step_hook: StepHook | None = None, artifacts: bool = True, now: datetime | None = None) -> RunResult:
+               step_hook: StepHook | None = None, artifacts: bool = True, now: datetime | None = None,
+               client=None, clock=None, history: Path | None = None) -> RunResult:
     """從檢查點續跑（手動暫停、等待核准、或程序中斷後）。等待核准時先套用人工決定，尚未決定則丟出 ApprovalPending。"""
     from seo_intel.core import approvals
     from seo_intel.observe.trace import TraceWriter, truncate_trace
 
-    ctx = resume_context(run_dir, settings, llm_factory, memory)
+    ctx = resume_context(run_dir, settings, llm_factory, memory, client=client, clock=clock, history=history)
     state = ctx.state
     notes = approvals.resume(ctx, now)
     truncate_trace(run_dir / "trace.jsonl", state.seq)

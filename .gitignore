@@ -10,6 +10,7 @@ dist/
 data/
 runs/
 evals/reports/
+evals/results/*/replay/
 
 # 本機機密
 .env

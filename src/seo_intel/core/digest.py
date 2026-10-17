@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 
 from seo_intel.core.context import EpisodeContext
-from seo_intel.core.frontier import template_key
+from seo_intel.core.frontier import site_recent_share, template_key
 
 PAGE_OBS_LIMIT = 25
 
@@ -28,9 +28,10 @@ def observation_digest(ctx: EpisodeContext) -> dict:
         if o.kind != "site_inventory":
             continue
         rows = o.data["templates"]
-        share = sum(r["n_recent"] for r in rows) / max(1, sum(r["n_urls"] for r in rows))
-        inventory.append({"obs": o.id, "site": o.data["domain"], "site_recent_share": round(share, 3),
-                          "templates": sorted(rows, key=lambda r: -r["recent_share"])[:8]})
+        share = site_recent_share(rows)
+        inventory.append({"obs": o.id, "site": o.data["domain"],
+                          "site_recent_share": round(share, 3) if share is not None else None,
+                          "templates": sorted(rows, key=lambda r: -(r["recent_share"] or 0))[:8]})
     findings = []
     seen = set()
     for tkey, urls in st.template_changes.items():

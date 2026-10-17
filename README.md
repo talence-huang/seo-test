@@ -80,8 +80,18 @@ seo-intel db init / db info              # 建立 data/intel.db、查看資料�
 ## 測試
 
 ```powershell
-pytest              # 單元測試（不連網、不呼叫 LLM、不花費）
+pytest              # 單元測試（不連網、不呼叫 LLM、不花費；含評測流程本身的測試）
 pytest -m live      # 端對端研究與 API 測試（呼叫真實 Opus，少量費用；網站以模擬傳輸代替）
+```
+
+## 評測：Agent 有沒有比第 1 天更好
+
+用 8 個由程式產生、有標準答案的測試網站（4 個訓練、4 個測試），比較「空記憶」（Day 1）與「學過之後」（Day N）的正確率、抓取次數與浪費的請求；同時植入一條錯誤經驗，看它多久被淘汰。網站、Wayback 與 SerpApi 都以模擬傳輸代替，不碰任何真實網站；Agent 本身照常使用真實 Opus。設計與結果見 [docs/08](docs/08-eval-day1-vs-dayN.md)。
+
+```powershell
+python -m evals run --max-usd 15                 # 完整評測（35 次研究，約 US$12，約 1 小時；超過上限即停止）
+python -m evals replay evals/reports/<名稱>       # 用錄製的 LLM 回應重跑並比對結果（不需要金鑰、不花錢）
+python -m evals one s1                           # 只研究一個測試網站一次（約 US$0.35）
 ```
 
 ## 文件
@@ -96,8 +106,10 @@ pytest -m live      # 端對端研究與 API 測試（呼叫真實 Opus，少量
 | [05 學習機制與 Evals](docs/05-memory-and-evals.md) | 需求 B |
 | [06 失效模式與自治邊界](docs/06-reliability-and-autonomy.md) | 需求 C |
 | [07 研究成果](docs/07-research-findings.md) | 研究期間（模擬世界）的數據、發現、限制與未來工作 |
+| [08 Day 1 vs Day N 評測](docs/08-eval-day1-vs-dayN.md) | 測試網站評測（真實 Opus）的設計與結果 |
+| [09 Coding Agent 協作紀錄](docs/09-development-log.md) | 從需求到實作的關鍵節點、指令、變更與發現 |
 
-docs/00–07 記錄的是研究期間的設計與成果，其中提到的 SimWeb、FakeLLM 與評測工具已移除，可從標籤 `research-final` 取回。
+docs/01–05、07 記錄的是研究期間的設計與成果，其中提到的 SimWeb、FakeLLM 與舊評測工具已移除，可從標籤 `research-final` 取回；docs/00、06、08 反映目前版本。
 
 ## 專案結構
 
@@ -114,6 +126,7 @@ src/seo_intel/
   observe/         即時主控台、trace、資料庫紀錄、timeline.html
   web/             本機網頁介面（標準庫 HTTP 伺服器 + 單頁前端，無額外套件）
   cli.py           seo-intel 指令
+evals/             Day 1 vs Day N 評測：測試網站產生器、評分器、評測流程、報告（python -m evals）
 tests/             單元測試（tests/realsite.py 是以模擬傳輸代替真實網站的測試資料）
 docs/              設計文件
 ```

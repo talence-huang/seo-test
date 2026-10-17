@@ -2,21 +2,23 @@
 
 > 核心原則：自治邊界**由程式強制執行**（`PolicyGate`），不是寫在 prompt 裡請 LLM 遵守。每個失效模式都要有「偵測 + 處置 + 測試」。
 
+> **2026-10-17 更新**：模擬世界 SimWeb 與假 LLM 已移除，原本以它們做的驗證改由單元測試與「測試網站評測」（`python -m evals`，見 [05 §4](05-memory-and-evals.md)）承擔；只存在於標籤 `research-final` 的驗證會在表中註明。
+
 ---
 
 ## 1. 失效模式
 
 前四項為需求點名的項目；後三項是本系統實作時無法迴避的。
 
-| # | 失效模式 | 偵測 | 處置 | SimWeb 測試 |
+| # | 失效模式 | 偵測 | 處置 | 驗證（目前版本） |
 |---|---|---|---|---|
-| F1 | **網站反爬**（429、403、挑戰頁） | 狀態碼；範本封鎖率 | 遵守 `Retry-After` 退避；403 不重試；網域斷路器；改用 `history`；M1 `avoid_path` 經驗。**絕不繞過**（偽造 UA、輪替 IP、繞過驗證都是禁止規則）。範本封鎖率 > 30% → 暫停請求核准 | `test_toolkit_*`、`test_failure_lesson_avoids_waf_path` |
-| F2 | **LLM 幻覺**（捏造 URL、數字、因果） | 程式驗證：引用的 ID 必須存在；數字主張由程式計算 | 主張由程式從證據推導；報告中不存在的引用移除、**引用全部無效的句子整句刪除**、建議必須引用成立的主張、標題由程式產生；紅隊反駁必須引用有效觀察 | `test_invalid_citations_and_claims_are_removed`、`test_compromised_llm_cannot_steer_actions_or_conclusions` |
-| F3 | **工具崩潰**（例外、逾時、連線失敗、格式錯誤） | 例外捕捉、逾時、斷路器計數 | 工具層對逾時、連線失敗、5xx 退避重試；工具或解析器的任何例外轉為 `tool_error` 觀察，迴圈不中斷；暫時性失敗的行動稍後再試一次 | `test_network_errors_are_retried_not_fatal`、`test_parser_crash_becomes_observation` |
-| F4 | **學到錯誤經驗** | 經驗與證據衝突（要求避開的路徑正是成立主張的範本）；套用後成功率；人工糾偏 | 先進 `candidate`，需 2 個 episode 支持才生效；衝突 ≥ 2 次或套用 ≥ 3 次且成功率 < 50% 自動淘汰；人工糾偏可撤回 M2 命中與成功經驗的支持；人工經驗不自動淘汰、只標記；快照回滾 | `tests/test_memory.py::test_poisoned_lesson_is_retired_by_evidence` 等 |
-| F5 | **預算失控 / 爬蟲陷阱** | `BudgetLedger` 即時累計；行動簽章重複；報酬遞減 | 硬上限；階段預留；陷阱過濾；每範本上限 | 2 萬頁網站 + 無限日曆 |
-| F6 | **Prompt injection**（來自頁面內容或被攻陷的 LLM） | 注入樣式掃描（頁面、送進 LLM 前的 prompt、報告敘述） | **結構性**：LLM 只看程式整理過的事實，看不到頁面原文；行動只能由程式產生；主張由程式推導；網址必須來自 sitemap / 連結 / SERP。**偵測**：含注入文字的頁面標記並不採用其連結；prompt 送出前移除疑似指令；system prompt 聲明資料區塊不可信；可疑關鍵字、無根據的報告敘述、帶指令的建議一律刪除 | `test_injection_page_is_quarantined`、`test_compromised_llm_cannot_steer_actions_or_conclusions` |
-| F7 | **LLM API 錯誤**（429、5xx、refusal、截斷、schema 不符） | SDK 型別化例外；`stop_reason`；Pydantic 驗證 | SDK 重試；Opus 5.5 server-side fallback；步驟級重試；失敗時有確定性的退路（預設目標、必要資訊需求、程式產生的報告標題）；呼叫過 LLM 的步驟立即存檔 | `test_flaky_llm_still_finishes`、`test_hard_kill_resumes_from_last_checkpoint` |
+| F1 | **網站反爬**（429、403、挑戰頁） | 狀態碼；範本封鎖率 | 遵守 `Retry-After` 退避；403 不重試；網域斷路器；改用 Wayback 歷史快照；M1 `avoid_path` 經驗。**絕不繞過**（偽造 UA、輪替 IP、繞過驗證都是禁止規則）。範本封鎖率 > 30% → 暫停請求核准 | `test_units.py::test_toolkit_respects_robots_backs_off_and_retries`；評測：測試網站的 `/compare/` 全部回 403，學成 `avoid_path` 經驗後避開（`test_evals.py`、評測報告的「浪費的請求」） |
+| F2 | **LLM 幻覺**（捏造 URL、數字、因果） | 程式驗證：引用的 ID 必須存在；數字主張由程式計算 | 主張由程式從證據推導；報告中不存在的引用移除、**引用全部無效的句子整句刪除**、建議必須引用成立的主張、標題由程式產生；紅隊反駁必須引用有效觀察 | `test_units.py::test_log_odds_and_report_validation`；評測：結論與標準答案比對（F1）、未驗證主張與無效引用數。被攻陷的 LLM 測試只在 `research-final` |
+| F3 | **工具崩潰**（例外、逾時、連線失敗、格式錯誤） | 例外捕捉、逾時、斷路器計數 | 工具層對逾時、連線失敗、5xx 退避重試；工具或解析器的任何例外轉為 `tool_error` 觀察，迴圈不中斷；暫時性失敗的行動稍後再試一次 | `test_units.py::test_toolkit_respects_robots_backs_off_and_retries`（斷線與 5xx 退避重試）。網路與解析器的混沌測試只在 `research-final` |
+| F4 | **學到錯誤經驗** | 經驗與證據衝突（要求避開的路徑正是成立主張的範本）；套用後成功率；人工糾偏 | 先進 `candidate`，需 2 個 episode 支持才生效；衝突 ≥ 2 次、或套用 ≥ 3 次且成功率比沒套用的研究低 25 個百分點以上，自動淘汰；人工糾偏可撤回 M2 命中與成功經驗的支持；人工經驗不自動淘汰、只標記；快照回滾 | `test_units.py::test_retirement_compares_with_episodes_without_the_lesson`、`test_memory_store_priors_and_human_lessons`；評測：植入錯誤經驗後連續研究，記錄第幾次被淘汰（`test_evals.py`、評測報告 §6） |
+| F5 | **預算失控 / 爬蟲陷阱** | `BudgetLedger` 即時累計；行動簽章重複；報酬遞減 | 硬上限；階段預留；陷阱過濾；每範本上限 | `test_units.py::test_budget_approval_extends_once`；評測：1–2 萬頁的測試網站 + 無限日曆，核准請求一律拒絕，任何上限都不被突破 |
+| F6 | **Prompt injection**（來自頁面內容或被攻陷的 LLM） | 注入樣式掃描（頁面、送進 LLM 前的 prompt、報告敘述） | **結構性**：LLM 只看程式整理過的事實，看不到頁面原文；行動只能由程式產生；主張由程式推導；網址必須來自 sitemap / 連結 / SERP。**偵測**：含注入文字的頁面標記並不採用其連結；prompt 送出前移除疑似指令；system prompt 聲明資料區塊不可信；可疑關鍵字、無根據的報告敘述、帶指令的建議一律刪除 | `test_units.py::test_extract_and_url_templates`、`test_log_odds_and_report_validation`；評測：注入頁排在 SERP 上，每次研究都會抓到 → 偵測、不跟隨（請求紀錄判定）。被攻陷的 LLM 測試只在 `research-final` |
+| F7 | **LLM API 錯誤**（429、5xx、refusal、截斷、schema 不符） | SDK 型別化例外；`stop_reason`；Pydantic 驗證 | SDK 重試；Opus 5.5 server-side fallback；步驟級重試；失敗時有確定性的退路（預設目標、必要資訊需求、程式產生的報告標題）；呼叫過 LLM 的步驟立即存檔 | `test_anthropic_client.py`（錯誤分類、refusal、截斷）；`test_evals.py`：每次 LLM 呼叫都失敗時研究仍跑完（確定性的退路）。硬中斷續跑只在 `research-final` |
 
 ---
 
@@ -34,7 +36,7 @@
 
 | 動作 | 等級 | 條件 |
 |---|---|---|
-| 讀取 robots、sitemap、`rank_query`、`history` | 自主 | 目標網域內 |
+| 讀取 robots、sitemap；查詢 SERP（SerpApi / CSV）與 Wayback 歷史快照 | 自主 | 目標網域內 |
 | 抓取頁面 | 自主 | 目標網域內、≤ 150 頁 / 網域 / episode、≤ 1 req/2s、遵守 robots |
 | 解析、萃取、統計 | 自主 | 本地運算 |
 | LLM 分析 | 自主 | episode 花費 ≤ US$2.00 |
@@ -113,14 +115,18 @@ seo-intel research resume E-xxxx
 
 ---
 
-## 3. 測試矩陣（`tests/test_autonomy.py`、`tests/test_failures.py`）
+## 3. 驗證矩陣（目前版本）
 
-| 類別 | 測試 | 通過標準 | 結果 |
+單元測試不呼叫 LLM、不連網（`pytest`）；評測是 35 次真實 Opus 研究（[08 §5.2](08-eval-day1-vs-dayN.md)），研究流程與研究真實網站相同，只有 HTTP 傳輸以模擬代替。
+
+| 類別 | 驗證 | 通過標準 | 結果 |
 |---|---|---|---|
-| 自治邊界 | 每個「禁止」動作都被拒、每個「需核准」動作都暫停；未列入政策的規則保守處理；LLM 無法發明工具 | 100% | ✅ |
-| 核准流程 | 暫停 → 核准 → 續跑完成；拒絕 → 降級並寫入限制、不再詢問；過期核准無效；未決定不能續跑；決定寫入 trace | 通過 | ✅ |
-| 反爬 | 429 / 403 情境下不超速、不重試 403；WAF 路徑學成經驗後避開 | 0 違規 | ✅ |
-| 注入 | 注入頁被抓到時：標記、不跟隨連結、LLM 看不到指令、結論不變；被攻陷的 LLM 無法讓 Agent 越界或改變結論 | 0 違規 | ✅ |
-| 混沌 | LLM 40% 暫時性錯誤 + 10% schema 錯誤；網路 25% 逾時 / 連線失敗；解析器 15% 崩潰；程序硬中斷 | 不崩潰、可續跑、結論不變 | ✅ |
-| 預算 | 2 萬頁網站上任何上限都不被突破（延長必須經人核准） | 通過 | ✅ |
-| 錯誤經驗 | 植入的錯誤經驗在 k 個 episode 內被淘汰 | 通過 | ✅ k = 2（Phase 4） |
+| 自治邊界 | `test_units.py`：每個「禁止」動作都被拒、每個「需核准」動作都暫停；未列入政策的規則保守處理；LLM 無法發明工具 | 100% | ✅ |
+| 核准流程 | `test_units.py`：一次性授權、拒絕後同一範圍不再詢問、過期核准無效、預算只延長一次並寫入紀錄 | 通過 | ✅ |
+| 反爬 | `test_units.py`：遵守 robots、退避、重試；評測：`/compare/` 全部回 403，學成經驗後 Day N 不再請求（浪費的請求 5 → 0） | 0 違規 | ✅ 0 違規 |
+| 注入 | `test_units.py`：指令偵測、帶指令的建議從報告移除；評測：注入頁排在 SERP 上 | 偵測率 100%、照著抓取 0 次 | ✅ 19/19 偵測、0 次 |
+| LLM 失效 | `test_anthropic_client.py`：錯誤分類、refusal、截斷；`test_evals.py`：每次 LLM 呼叫都失敗時研究仍跑完 | 不崩潰 | ✅ |
+| 工具崩潰 | 評測：單次研究的例外記為崩潰、評測繼續 | 0 崩潰 | ✅ 35 次研究 0 崩潰 |
+| 預算與陷阱 | 評測：7,000–19,000 頁的網站加無限日曆；核准請求一律拒絕 | 上限不被突破 | ✅ 核准請求 0 次 |
+| 錯誤經驗 | `test_units.py`：淘汰規則與對照組比較；評測：植入「答案範本應避開」的錯誤經驗後連續研究 | k ≤ 3 | ✅ k = 2（與證據衝突 2 次） |
+| 僅 `research-final` | 網路 25% 逾時、解析器 15% 崩潰、LLM 40% 暫時性錯誤的混沌測試；被攻陷的 LLM；程序硬中斷後續跑 | — | 研究期間通過（[07 §4](07-research-findings.md)） |

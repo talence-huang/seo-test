@@ -70,6 +70,12 @@ def detect_trap(tkey: str) -> str | None:
     return None
 
 
+def site_recent_share(rows: list[dict]) -> float | None:
+    """全站平常的更新比例：只計 sitemap 有 lastmod 的網址（沒有日期不等於沒有更新）。None＝完全沒有日期。"""
+    dated = sum(r.get("n_dated", r["n_urls"]) for r in rows)
+    return sum(r["n_recent"] for r in rows) / dated if dated else None
+
+
 @dataclass
 class Entry:
     url: str
@@ -91,6 +97,7 @@ class TemplateStat:
     domain: str
     n_urls: int = 0
     n_sitemap: int = 0
+    n_dated: int = 0              # 有 lastmod 的網址（更新比例的分母）
     n_recent: int = 0             # lastmod 落在研究期間內
     n_fetched: int = 0
     n_evidence: int = 0
@@ -159,11 +166,11 @@ class Frontier:
 
     def reprime(self, domain: str, rows: list[dict]) -> None:
         """探勘後已知範本規模與更新爆發度：重新查詢先驗（只針對尚未抓取的範本）。"""
-        share = sum(r["n_recent"] for r in rows) / max(1, sum(r["n_urls"] for r in rows))
+        share = site_recent_share(rows) or 0.0
         by_name = {r["template"]: r for r in rows}
         for stat in self.stats([domain]):
             row = by_name.get(stat.key.split("/", 1)[1])
-            if row and row["n_urls"]:
+            if row and row["recent_share"] is not None:   # 沒有 lastmod 的範本：更新爆發度未知
                 stat.burst = round(row["recent_share"] / max(share, 0.01), 2)
             self._prime(stat)
 
@@ -201,6 +208,7 @@ class Frontier:
                 self._prime(stat)
             stat.n_urls += 1
             stat.n_sitemap += source == "sitemap"
+            stat.n_dated += lastmod is not None
             stat.n_recent += self._in_window(lastmod)
         else:
             if source not in entry.sources:
@@ -210,8 +218,11 @@ class Frontier:
             if anchor and not entry.anchor:
                 entry.anchor = anchor
                 entry.relevance = max(entry.relevance, self._relevance(url, anchor))
-            if lastmod and not entry.lastmod:
+            if lastmod and not entry.lastmod:   # 例如先從 SERP 加入、之後 sitemap 才提供 lastmod
                 entry.lastmod = lastmod
+                stat = self.templates[entry.template]
+                stat.n_dated += 1
+                stat.n_recent += self._in_window(lastmod)
         if entry.status == "new":
             entry.version += 1
             heapq.heappush(self._heaps.setdefault(entry.template, []), (-self._static(entry)[0], entry.version, url))

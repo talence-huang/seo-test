@@ -144,6 +144,13 @@ class MemoryStore:
              row["fetches"], row["api_calls"], row["llm_usd"], json.dumps(row.get("lessons", [])), 0, utc_now()))
         self.conn.commit()
 
+    def success_rate(self, without_lesson: str | None = None) -> tuple[float | None, int]:
+        """episode 的成功率與樣本數；without_lesson：只看沒有套用這條經驗的 episode（淘汰經驗時的對照組）。"""
+        rows = self.conn.execute("SELECT success, lessons_json FROM episode_outcomes").fetchall()
+        if without_lesson is not None:
+            rows = [r for r in rows if without_lesson not in json.loads(r["lessons_json"])]
+        return (sum(r["success"] for r in rows) / len(rows) if rows else None), len(rows)
+
     def outcome(self, episode_id: str) -> sqlite3.Row | None:
         return self.conn.execute("SELECT * FROM episode_outcomes WHERE episode_id = ?", (episode_id,)).fetchone()
 

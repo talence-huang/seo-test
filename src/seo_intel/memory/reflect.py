@@ -2,8 +2,10 @@
 
 - M2：只從「成功」的 episode 學 URL 價值（結論不明時不知道哪個範本才是答案，學了只會學到雜訊）
 - M1：從失敗（被封鎖的路徑、JS 空殼頁）與成功（答案範本具備哪些訊號、免費證據是否已足夠）萃取候選經驗
-- 治理：候選經驗需 2 個 episode 支持才生效；套用後成功率偏低或與證據衝突的自動經驗會被淘汰；
+- 治理：候選經驗需 2 個 episode 支持才生效；與證據衝突、或套用後成功率明顯低於「沒套用時」的自動經驗會被淘汰；
   人工糾偏的經驗不會被 Agent 淘汰，只會標記「建議人工檢視」（淘汰人工經驗屬於需核准的動作）
+- 成功率要和對照組比：研究本身就難（例如證據只能證明相關、不能證明因果）時，不論有沒有經驗，成功率都偏低；
+  用固定門檻會把「避開防火牆路徑」這類與結論對錯無關的效率經驗也淘汰掉（2026-10-17 真實 Opus 評測發現）
 """
 
 from __future__ import annotations
@@ -18,7 +20,9 @@ from seo_intel.memory.models import Bias, Lesson
 
 ACTIVATE_AT = 2          # 需要幾個不同 episode 支持才生效
 RETIRE_MIN_APPLIED = 3
-RETIRE_BELOW = 0.5
+RETIRE_MARGIN = 0.25         # 套用後成功率比對照組低這麼多才淘汰
+MIN_CONTROL = 3              # 對照組（沒套用的 episode）至少要有幾個，不足時改用全部 episode
+DEFAULT_BASELINE = 0.75      # 沒有任何對照資料時：等同「成功率 < 50% 即淘汰」
 RETIRE_CONFLICTS = 2
 
 
@@ -159,18 +163,31 @@ def govern_applied(ctx: EpisodeContext, store, success: bool, lines: list[str]) 
         store.save_lesson(lesson)
 
 
+def baseline(store, lesson_id: str) -> float:
+    """對照組的成功率：沒有套用這條經驗的 episode；不足 MIN_CONTROL 個時用全部 episode。"""
+    if store is None:
+        return DEFAULT_BASELINE
+    rate, n = store.success_rate(without_lesson=lesson_id)
+    if n < MIN_CONTROL:
+        rate, n = store.success_rate()
+    return rate if rate is not None and n >= MIN_CONTROL else DEFAULT_BASELINE
+
+
 def maybe_retire(store, lesson: Lesson, episode_id: str, lines: list[str]) -> None:
-    """淘汰規則：自動經驗與證據衝突 ≥ 2 次，或套用 ≥ 3 次且成功率 < 50%。人工經驗只標記、不淘汰。"""
+    """淘汰規則：自動經驗與證據衝突 ≥ 2 次，或套用 ≥ 3 次且成功率比對照組低 25 個百分點以上。人工經驗只標記、不淘汰。"""
     rate = lesson.success_rate
     if lesson.source == "human_correction":
         if lesson.conflicts:
             lines.append(f"⚠ 人工經驗 {lesson.id} 與證據衝突 {lesson.conflicts} 次：建議人工檢視（Agent 不會自行淘汰人工經驗）")
-    elif lesson.status != "retired" and (
-            lesson.conflicts >= RETIRE_CONFLICTS
-            or (lesson.applied >= RETIRE_MIN_APPLIED and rate is not None and rate < RETIRE_BELOW)):
+        return
+    if lesson.status == "retired":
+        return
+    base = baseline(store, lesson.id)
+    if lesson.conflicts >= RETIRE_CONFLICTS or (
+            lesson.applied >= RETIRE_MIN_APPLIED and rate is not None and rate < base - RETIRE_MARGIN):
         lesson.status = "retired"
         lesson.retired_reason = (f"與證據衝突 {lesson.conflicts} 次" if lesson.conflicts >= RETIRE_CONFLICTS
-                                 else f"套用 {lesson.applied} 次、成功率 {rate:.0%}")
+                                 else f"套用 {lesson.applied} 次、成功率 {rate:.0%}，明顯低於沒套用時的 {base:.0%}")
         store.event(lesson.id, episode_id, "retired", lesson.retired_reason)
         lines.append(f"淘汰經驗 {lesson.id}：{lesson.retired_reason}")
 

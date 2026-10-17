@@ -71,12 +71,13 @@ seo-intel feedback correct <episode_id> --claim C1 --verdict wrong --reason "shi
 ### 2.4 經驗治理（防止學到錯誤經驗）
 
 ```
-candidate ──(2 個不同 episode 支持)──► active ──(與證據衝突 ≥ 2 次，或套用 ≥ 3 次且成功率 < 50%)──► retired
+candidate ──(2 個不同 episode 支持)──► active ──(與證據衝突 ≥ 2 次，或套用 ≥ 3 次且成功率比對照組低 25 個百分點以上)──► retired
 human_correction ──► active（Agent 不會自行淘汰；與證據衝突時標記「建議人工檢視」；只能由人 memory retire）
 ```
 
 - **成功**：`hypothesis_supported` 且所有主張的引用驗證通過。M2 只從成功的 episode 學。
 - **衝突**：`avoid_path` 要求避開的路徑，正是成立主張的範本（經驗與客觀證據直接矛盾）。
+- **對照組**：沒有套用這條經驗的 episode 的成功率（不足 3 個時用全部 episode；完全沒有資料時視為 75%，等同舊規則的 50% 門檻）。2026-10-17 修改：原本是固定的「成功率 < 50%」，但真實 Opus 評測中有一半訓練網站不論有沒有經驗都下不了結論，「避開防火牆路徑」這類與結論對錯無關的效率經驗因此全被淘汰（見 [08](08-eval-day1-vs-dayN.md)）。和對照組比，才能分辨「經驗有害」和「研究本來就難」。
 - **人工糾偏判定 `wrong` 時的回溯**：撤回該 episode 給主張範本的 M2 命中（`reward_log` 記錄到範本層級，可精確撤銷、不會重複扣）；該 episode 套用過的經驗成功次數 −1（可能觸發淘汰）；從該 episode 萃取的 `success` 經驗撤回支持（支持數 < 2 退回候選，歸零則淘汰）。`partial` 撤回一半命中；`correct` 只記錄。
 - **稽核軌跡**：所有狀態變更寫入 `lesson_events`（建立、支持、生效、套用、衝突、糾偏、淘汰），`seo-intel memory show L-x` 可逐筆查看。
 - **快照**：`seo-intel memory snapshot <檔案>`（SQLite backup），評測前凍結記憶、或回溯錯誤學習時使用。
@@ -92,6 +93,8 @@ human_correction ──► active（Agent 不會自行淘汰；與證據衝突�
 - 完全確定性、可離線測試，是最容易重現的進步證據。
 
 ## 4. Evals：證明「現在比第 1 天更好」
+
+> **目前的評測**：以下 4.1–4.5 是研究期間用 SimWeb 與假 LLM 做的評測（已移除）。目前改用 8 個有標準答案的測試網站與真實 Opus 比較 Day 1 與 Day N（`python -m evals run`），設計與結果見 [08](08-eval-day1-vs-dayN.md)。
 
 ### 4.1 SimWeb 研究環境（`simweb/`）
 

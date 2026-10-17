@@ -11,7 +11,7 @@ import math
 from dataclasses import dataclass
 
 from seo_intel.core.context import EpisodeContext
-from seo_intel.core.frontier import template_key
+from seo_intel.core.frontier import site_recent_share, template_key
 from seo_intel.core.models import Action, Hypothesis, Observation, Phase, Probe, Strength
 
 COMPETITOR = frozenset({"competitor_content_change", "competitor_new_pages"})
@@ -197,9 +197,12 @@ def _burst(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
     row = next((r for r in rows if r["template"] == name), None)
     if row is None or not row["n_urls"]:
         return []
-    site_share = sum(r["n_recent"] for r in rows) / max(1, sum(r["n_urls"] for r in rows))
+    site_share = site_recent_share(rows)
+    if row["recent_share"] is None or site_share is None:   # 沒有日期不等於沒有更新：不計入證據
+        return [Draft(h.id, "none", "weak", [inv.id], f"sitemap 沒有列出 {name} 的 lastmod：無法判斷更新爆發度，不計入證據")]
     ratio = row["recent_share"] / max(site_share, 0.01)
-    note = f"{name} 期間內更新 {row['n_recent']}/{row['n_urls']}（{row['recent_share']:.0%}），全站平常 {site_share:.0%}，為 {ratio:.1f} 倍"
+    note = (f"{name} 期間內更新 {row['n_recent']}/{row.get('n_dated', row['n_urls'])}（{row['recent_share']:.0%}），"
+            f"全站平常 {site_share:.0%}，為 {ratio:.1f} 倍")
     if row["recent_share"] >= 0.8:
         return [Draft(h.id, "for", "strong", [inv.id], note + "：幾乎整個範本都在期間內新增或改版")]
     if ratio >= 2.0 and row["recent_share"] >= 0.15:
@@ -207,6 +210,24 @@ def _burst(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
     if ratio < 1.3:
         return [Draft(h.id, "against", "moderate", [inv.id], note + "：與全站平常水準相當，屬背景變動")]
     return []
+
+
+def _site_base_rate(ctx: EpisodeContext, site: str) -> float | None:
+    inv = _latest(ctx, "site_inventory", domain=site)
+    if not inv:
+        return None
+    return site_recent_share(inv.data["templates"])
+
+
+def _page_state(info: dict | None) -> str:
+    """changed / unchanged / unknown。沒有快照、無法判定的頁面不能算進分母。"""
+    if not info or info.get("status") != 200:
+        return "unknown"
+    if info.get("change"):
+        return "changed"
+    if not info.get("evidence"):
+        return "unchanged"           # 修改與發布日期都不在期間內
+    return "unchanged" if info.get("diff_status") == "ok" else "unknown"
 
 
 def _sample(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:

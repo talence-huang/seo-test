@@ -545,12 +545,15 @@ def _parse_discover(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
     added = sum(fr.add(u, source=src, lastmod=lm, allowed=ctx.http.allowed(u)) for u, lm in raw["entries"])
     if src == "link":
         out.details.append(f"{domain} 沒有可用的 sitemap：改從首頁的站內連結開始（沒有 lastmod，無法判斷更新爆發度）")
-    rows = [{"template": s.key.split("/", 1)[1], "n_urls": s.n_urls, "n_recent": s.n_recent,
-             "recent_share": round(s.n_recent / s.n_urls, 3) if s.n_urls else 0}
+    rows = [{"template": s.key.split("/", 1)[1], "n_urls": s.n_urls, "n_dated": s.n_dated, "n_recent": s.n_recent,
+             "recent_share": round(s.n_recent / s.n_dated, 3) if s.n_dated else None}   # None：sitemap 沒有 lastmod
             for s in fr.stats([domain]) if s.n_sitemap]
-    hot = sorted(rows, key=lambda r: (-r["recent_share"], -r["n_recent"]))[:3]
+    hot = sorted((r for r in rows if r["recent_share"] is not None),
+                 key=lambda r: (-r["recent_share"], -r["n_recent"]))[:3]
+    undated = [r["template"] for r in rows if r["recent_share"] is None]
     summary = (f"{domain}：{added:,} 個 URL、{len(rows)} 個範本；期間內更新比例最高："
-               + "、".join(f"{r['template']}（{r['n_recent']}/{r['n_urls']}）" for r in hot))
+               + "、".join(f"{r['template']}（{r['n_recent']}/{r['n_dated']}）" for r in hot)
+               + (f"；沒有 lastmod：{'、'.join(undated[:3])}" if undated else ""))
     fr.reprime(domain, rows)   # 已知範本規模與更新爆發度：重新查詢經驗先驗
     primed = [s for s in fr.stats([domain]) if s.prior_source]
     if primed:
