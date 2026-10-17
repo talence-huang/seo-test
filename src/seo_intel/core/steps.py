@@ -7,18 +7,21 @@ LLM 只出現在 DEFINE_GOAL 與 PLAN_INFO_NEEDS（Phase 3 起加入假設、驗
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from datetime import date, timedelta
 from urllib.parse import urlsplit
 
-from seo_intel.core import beliefs, probes
+from seo_intel.core import approvals, beliefs, probes
 from seo_intel.core.actions import COMPONENT_LABELS, compute_phase, generate
 from seo_intel.core.claims import confounder_note, derive_claims, render_markdown, validate_citations
 from seo_intel.core.context import EpisodeContext, StepOutcome, llm_record
 from seo_intel.core.digest import hypotheses_digest, observation_digest
 from seo_intel.core.frontier import Frontier, normalize_url, template_key
-from seo_intel.core.models import EvidenceItem, Hypothesis, InfoNeed, Phase, ResearchGoal, TaskInput
+from seo_intel.core.policy import EST_DISCOVER_FETCHES
+from seo_intel.core.models import (Action, EvidenceItem, Hypothesis, InfoNeed, Phase, ResearchGoal, TaskInput,
+                                   action_scope)
 from seo_intel.llm.roles import (
     EVIDENCE_SYSTEM,
     HYPOTHESIZER_SYSTEM,
@@ -39,7 +42,7 @@ from seo_intel.llm.roles import (
     verifier_prompt,
 )
 from seo_intel.llm.types import LLMError
-from seo_intel.tools.extract import PageFeatures
+from seo_intel.tools.extract import PageFeatures, looks_like_instructions, redact_instructions
 from seo_intel.tools.history import history_diff
 from seo_intel.tools.rank import matches_topic, rank_scan, serp_scan, tokens
 from seo_intel.tools.site import discover, fetch_page
@@ -48,12 +51,18 @@ _QUOTED = re.compile(r"「([^」]+)」")
 DIMINISHING_WINDOW = 15
 CHANGES_TO_RESOLVE = 3
 ON_TOPIC_OVERLAP = 0.75
+MAX_KEYWORD_WORDS = 8
+MAX_ACTION_ATTEMPTS = 2
+_TRANSIENT = re.compile(r"timeout|connect_error|http_5[0-9][0-9]|http_429")
 
 
 # ---------- 共用 ----------
 
 def _call_llm(ctx: EpisodeContext, role: str, user: str, schema, retries: int = 1, system: str = PLANNER_SYSTEM):
     records: list[dict] = []
+    user, n_redacted = redact_instructions(user)   # F6 最後一道防線：LLM 只該看到程式整理過的資料
+    if n_redacted:
+        ctx.state.security_events.append(f"送給 {role} 的資料中有 {n_redacted} 段疑似指令文字，已在送出前移除")
     for attempt in range(retries + 1):
         try:
             res = ctx.llm.call(role, system=system, user=user, schema=schema)
@@ -118,7 +127,11 @@ def normalize_goal(out: GoalOut | None, task: TaskInput) -> tuple[ResearchGoal, 
         ws, we = hint
     if we > task.today:
         we = task.today
-    keywords = [k.strip().lower() for k in out.topic_keywords if k.strip()][:5]
+    raw_kw = [k.strip().lower() for k in out.topic_keywords if k.strip()]
+    keywords = [k for k in raw_kw if not looks_like_instructions(k) and "://" not in k
+                and len(k.split()) <= MAX_KEYWORD_WORDS][:5]
+    if len(keywords) < min(5, len(raw_kw)):
+        notes.append("已移除可疑或過長的關鍵字（疑似指令文字、網址或超過 8 個字）")
     if not keywords:
         notes.append("LLM 未提供關鍵字，改用問題中的引號詞")
         keywords = _fallback_keywords(task)
@@ -153,6 +166,8 @@ def define_goal(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
     out, records, error = _call_llm(ctx, "planner", goal_prompt(st.task), GoalOut)
     goal, notes = normalize_goal(out, st.task)
+    if any("疑似指令" in n for n in notes):
+        st.security_events.append("LLM 提出的研究目標含疑似指令文字或網址的關鍵字，已在使用前移除")
     st.goal = goal
     ctx.frontier = Frontier(goal.topic_keywords, (goal.window_start, goal.window_end), st.task.allowed_domains)
     ctx.frontier.set_focus(goal.focus_domains)
@@ -245,6 +260,62 @@ def _score_line(breakdown: dict[str, float]) -> str:
     return " ".join(parts)
 
 
+def _pause_for_action(ctx: EpisodeContext, a: Action, v) -> StepOutcome:
+    est = {"domain": action_scope(a), "tool": a.tool}
+    if v.rule == "continue_after_blocks":
+        rate, n = ctx.policy.block_rate(action_scope(a))
+        est |= {"block_rate": round(rate, 3), "fetched": n}
+    ap = approvals.request(ctx, v.rule, v.reason, action=a, estimate=est)
+    return StepOutcome(summary=f"暫停：{_short(a.label())} 需要人工核准（{ap.id}）",
+                       details=[f"規則 {v.rule}：{v.reason}", f"核准請求 {ap.id}，期限 {ap.expires_at}",
+                                f"核准：seo-intel approvals approve {ap.id}；拒絕：seo-intel approvals reject {ap.id}"],
+                       decision={"phase": ctx.state.phase, "approval": ap.model_dump(mode="json")}, reason=v.reason)
+
+
+def _fetches_needed(queue: list[Action]) -> int:
+    return sum(1 if a.tool == "fetch" else EST_DISCOVER_FETCHES for a in queue if a.tool in ("fetch", "discover"))
+
+
+def request_budget(ctx: EpisodeContext, resource: str, amount: float, reason: str, estimate: dict) -> StepOutcome | None:
+    """預算用盡但還有待完成的工作：請求人工核准延長。之前被拒絕過（或政策禁止）則回傳 None，由呼叫端降級。"""
+    st = ctx.state
+    if ctx.policy.classify("exceed_budget") == "deny" or approvals.denied(st, "exceed_budget", resource):
+        return None
+    ap = approvals.request(ctx, "exceed_budget", reason, extend={resource: amount}, estimate=estimate)
+    label = approvals.RESOURCE_ZH.get(resource, resource)
+    return StepOutcome(summary=f"暫停：{reason}；請求延長{label} {amount:g}（{ap.id}）",
+                       details=[f"預估：{json.dumps(estimate, ensure_ascii=False)}", f"核准請求 {ap.id}，期限 {ap.expires_at}",
+                                f"核准：seo-intel approvals approve {ap.id}；拒絕：seo-intel approvals reject {ap.id}"
+                                "（拒絕時以現有證據下結論，並在報告註明限制）"],
+                       decision={"phase": st.phase, "approval": ap.model_dump(mode="json")}, reason=reason)
+
+
+def _fetch_budget_request(ctx: EpisodeContext) -> StepOutcome | None:
+    st = ctx.state
+    need = _fetches_needed(st.evidence_queue)
+    amount = need + max(2, math.ceil(need * RETRY_MARGIN))   # 重試（429、5xx）也算抓取：預估不留餘裕，一次核准會變兩次
+    pids = sorted({a.probe_id for a in st.evidence_queue if a.probe_id})
+    labels = [f"{p} {probes.CATALOG[st.probe(p).kind].label}" for p in pids if st.probe(p)]
+    reason = f"驗證還需要約 {need} 次抓取（{'、'.join(labels) or '證據佇列'}），但抓取預算 {ctx.ledger.max_fetches} 次已用完"
+    est = {"fetches": need, "with_retry_margin": amount,
+           "share_of_original_budget": round(amount / ctx.settings.budget.max_fetches, 3),
+           "probes": labels, "testing_hypotheses": [h.id for h in st.hypotheses if h.status == "testing"]}
+    return request_budget(ctx, "max_fetches", amount, reason, est)
+
+
+def _drop_queue(ctx: EpisodeContext, why: str) -> list[str]:
+    st = ctx.state
+    lines = []
+    for a in st.evidence_queue:
+        probes.drop_action(ctx, a, why)
+        lines.append(f"✗ 略過 {_short(a.label())}：{why}")
+    if st.evidence_queue:
+        pids = sorted({a.probe_id for a in st.evidence_queue if a.probe_id})
+        st.limitations.append(f"{why}：{'、'.join(pids) or '部分證據'} 未完成，結論只依據已取得的證據")
+    st.evidence_queue = []
+    return lines
+
+
 def _select_evidence_action(ctx: EpisodeContext) -> StepOutcome:
     """證據佇列優先：使用保留給驗證的預算。"""
     st = ctx.state
@@ -253,9 +324,12 @@ def _select_evidence_action(ctx: EpisodeContext) -> StepOutcome:
     while st.evidence_queue:
         a = st.evidence_queue.pop(0)
         if a.tool in ("fetch", "discover") and ctx.ledger.fetch_room(Phase.VERIFICATION) <= 0:
-            probes.drop_action(ctx, a, "驗證抓取額度已用完")
-            skipped.append(f"✗ 略過 {a.label()}：驗證抓取額度已用完")
-            continue
+            st.evidence_queue.insert(0, a)
+            if (paused := _fetch_budget_request(ctx)) is not None:
+                st.pending = None
+                return paused
+            skipped += _drop_queue(ctx, "抓取預算已用完（人工拒絕延長）")
+            break
         v = ctx.policy.check(a)
         if v.decision == "deny":
             probes.drop_action(ctx, a, f"政策拒絕：{v.reason}")
@@ -263,10 +337,8 @@ def _select_evidence_action(ctx: EpisodeContext) -> StepOutcome:
             continue
         if v.decision == "require_approval":
             st.evidence_queue.insert(0, a)
-            st.status = "waiting_approval"
-            st.approval_request = {"action": a.model_dump(mode="json"), "rule": v.rule, "reason": v.reason}
-            return StepOutcome(summary=f"暫停：{a.label()} 需要人工核准", details=[f"規則 {v.rule}：{v.reason}"],
-                               decision={"phase": st.phase, "approval": st.approval_request}, reason=v.reason)
+            st.pending = None
+            return _pause_for_action(ctx, a, v)
         st.pending = a
         ctx.scratch["no_candidates"] = False
         details = [f"理由：{a.reason}", f"證據佇列剩餘 {len(st.evidence_queue)} 個行動"] + skipped
@@ -296,11 +368,8 @@ def select_action(ctx: EpisodeContext) -> StepOutcome:
             if a.tool == "fetch":
                 ctx.frontier.exclude(a.args["url"], v.rule or "policy")
             continue
-        st.status = "waiting_approval"
-        st.approval_request = {"action": a.model_dump(mode="json"), "rule": v.rule, "reason": v.reason}
         st.pending = None
-        return StepOutcome(summary=f"暫停：{a.label()} 需要人工核准", details=[f"規則 {v.rule}：{v.reason}"],
-                           decision={"phase": st.phase, "approval": st.approval_request}, reason=v.reason)
+        return _pause_for_action(ctx, a, v)
     st.pending = chosen
     ctx.scratch["no_candidates"] = chosen is None
     if chosen is not None and ctx.memory is not None:
@@ -399,14 +468,19 @@ def execute_tool(ctx: EpisodeContext) -> StepOutcome:
             summary = f"history_diff {_short(url)} → {raw['status']}"
         else:
             raise ValueError(f"未知工具 {a.tool}")
-    except RuntimeError as e:   # API 錯誤（例如預算用盡、參數無效）
-        raw = {"error": str(e)}
-        summary = f"{a.label()} → 失敗：{e}"
+    except Exception as e:   # F3：工具崩潰（API 錯誤、例外、格式錯誤）轉成觀察，迴圈不中斷
+        raw = {"error": f"{type(e).__name__}: {e}"}
+        summary = f"{a.label()} → 失敗：{type(e).__name__}: {e}"
     ctx.scratch["raw"] = raw
     attempts = ctx.http.drain_attempts()
     waited = sum(x.waited_s for x in attempts)
     details = [f"HTTP 請求 {len(attempts)} 次，禮貌等待 {waited:.1f}s，耗時 {ctx.clock.now() - t0:.1f}s（環境時間）"]
     details += [f"重試：{_short(x.url)} 第 {x.attempt} 次 → {x.status or x.error}" for x in attempts if x.error]
+    if "error" in raw and not a.probe_id and _TRANSIENT.search(raw["error"]):   # F3：暫時性錯誤，行動層再給一次機會
+        n = st.failed_attempts[a.signature] = st.failed_attempts.get(a.signature, 0) + 1
+        if n < MAX_ACTION_ATTEMPTS:
+            st.done_signatures.remove(a.signature)
+            details.append(f"暫時性錯誤（第 {n} 次）：稍後會再嘗試這個行動")
     return StepOutcome(summary=summary, details=details, decision={"action": a.model_dump(mode="json")},
                        tool_calls=[{"url": x.url, "status": x.status, "error": x.error, "attempt": x.attempt,
                                     "waited_s": round(x.waited_s, 2)} for x in attempts])
@@ -547,7 +621,7 @@ def _parse_fetch(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
     evidence = on_topic and (in_win(mod) or in_win(pub)) and not f.js_shell
     new_page = on_topic and in_win(pub)
     n_before = len(fr.entries)
-    for link, anchor in f.links:
+    for link, anchor in ([] if f.suspicious_instructions else f.links):   # F6：含注入文字的頁面不提供連結
         fr.add(link, source="link", anchor=anchor, allowed=ctx.http.allowed(link))
     entry = fr.entries.get(url)
     fr.mark_fetched(url, ok=True, evidence=evidence, blocked=False)
@@ -573,7 +647,9 @@ def _parse_fetch(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
         obs = st.add_observation("security_flag", f"{_short(url)} 含疑似對 AI 下指令的文字，已視為資料並忽略",
                                  {"url": url}, url=url)
         out.observations.append(obs.id)
-        out.details.append("⚠ 偵測到頁面內嵌指令（prompt injection），僅記錄，不影響任何行動")
+        st.security_events.append(f"{_short(url)} 含疑似對 AI 下指令的文字（prompt injection）：已忽略，"
+                                  f"也不採用此頁的 {len(f.links)} 個連結")
+        out.details.append(f"⚠ 偵測到頁面內嵌指令（prompt injection）：視為資料、不採用此頁的 {len(f.links)} 個連結")
     if f.js_shell:
         out.details.append("JS 空殼頁：沒有可用內容")
     if f.malformed:
@@ -612,8 +688,14 @@ def parse_result(ctx: EpisodeContext) -> StepOutcome:
                                  need_id=st.pending.need_id)
         out.summary, out.observations = obs.summary, [obs.id]
     else:
-        {"rank_scan": _parse_rank, "serp_scan": _parse_serp, "discover": _parse_discover, "fetch": _parse_fetch,
-         "history_diff": _parse_history}[st.pending.tool](ctx, raw, out)
+        try:
+            {"rank_scan": _parse_rank, "serp_scan": _parse_serp, "discover": _parse_discover, "fetch": _parse_fetch,
+             "history_diff": _parse_history}[st.pending.tool](ctx, raw, out)
+        except Exception as e:   # F3：解析失敗（例如資料格式異常）只影響這一筆結果
+            obs = st.add_observation("tool_error", f"{st.pending.label()} 結果無法解析：{type(e).__name__}: {e}",
+                                     {"error": f"{type(e).__name__}: {e}"}, need_id=st.pending.need_id)
+            out.summary = obs.summary
+            out.observations.append(obs.id)
     if st.pending.probe_id:
         probes.on_action_done(ctx, st.pending, out.observations)
         p = st.probe(st.pending.probe_id)
@@ -842,6 +924,9 @@ def revise_beliefs(ctx: EpisodeContext) -> StepOutcome:
 # ---------- DECIDE_NEXT ----------
 
 _HARD_STOPS = ("max_llm_usd", "max_wall_time_s", "max_actions", "max_iterations")
+EXTENDABLE = ("max_llm_usd", "max_wall_time_s")   # 可請求延長；行動數與迭代數是防失控的安全網，不延長
+RETRY_MARGIN = 0.25                                 # 抓取延長的重試餘裕
+EXTEND_SHARE = 0.5                                 # 每次請求延長設定值的 50%
 
 
 def decide_next(ctx: EpisodeContext) -> StepOutcome:
@@ -866,8 +951,23 @@ def decide_next(ctx: EpisodeContext) -> StepOutcome:
     testing = [h for h in st.hypotheses if h.status == "testing"]
     supported = [h for h in st.hypotheses if h.status == "supported"]
     live = [h for h in st.hypotheses if h.status != "rejected"]
+    paused = None
+    if stop == "max_fetches" and _fetches_needed(st.evidence_queue):
+        paused = _fetch_budget_request(ctx)
+    elif stop in EXTENDABLE and (testing or st.evidence_queue or not st.hypotheses):
+        amount = round(getattr(ctx.settings.budget, stop) * EXTEND_SHARE, 2)
+        used = st.budget.llm_usd if stop == "max_llm_usd" else round(ctx.ledger.elapsed(), 1)
+        reason = f"{approvals.RESOURCE_ZH[stop]}已達上限 {ctx.ledger.cap(stop):g}（已用 {used:g}），研究尚未完成"
+        paused = request_budget(ctx, stop, amount, reason, {
+            "used": used, "cap": ctx.ledger.cap(stop), "extend": amount,
+            "testing_hypotheses": [h.id for h in testing], "evidence_queue": len(st.evidence_queue)})
+    if paused is not None:
+        st.decision = "continue"   # 續跑後回到選擇行動，由下一次 DECIDE_NEXT 重新評估
+        return paused
     if stop in _HARD_STOPS:
         st.decision, st.end_reason = ("revise", None) if executed else ("finish", f"budget:{stop}")
+        if st.decision == "finish" and (testing or not st.hypotheses):
+            st.limitations.append(f"{approvals.RESOURCE_ZH.get(stop, stop)}達上限，研究在完成前結束")
     elif st.evidence_queue and stop is None:
         st.decision = "continue"
     elif executed:
@@ -891,9 +991,8 @@ def decide_next(ctx: EpisodeContext) -> StepOutcome:
     else:
         st.decision, st.end_reason = "finish", ("hypothesis_supported" if supported else "inconclusive")
     if st.evidence_queue and stop is not None and stop not in _HARD_STOPS:
-        for a in st.evidence_queue:
-            probes.drop_action(ctx, a, "抓取預算已用完")
-        st.evidence_queue = []
+        refused = approvals.denied(st, "exceed_budget", "max_fetches")
+        out.details += _drop_queue(ctx, "抓取預算已用完" + ("（人工拒絕延長）" if refused else ""))
 
     labels = {"continue": "繼續", "form": "形成假設", "seek": "尋找證據", "revise": "修正推論"}
     if st.decision == "finish":
@@ -931,6 +1030,9 @@ def report(ctx: EpisodeContext) -> StepOutcome:
     raw = raw or {"headline": "", "summary": f"（報告敘述產生失敗：{error}）", "findings": [], "excluded": [],
                   "caveats": [], "recommendations": []}
     cleaned, stats = validate_citations(raw, st, claims)
+    # 程式補上的限制（人工拒絕、預算用盡、安全事件）：不依賴 LLM 是否提到
+    cleaned["caveats"] = list(cleaned.get("caveats", [])) + [f"（系統）{x}" for x in st.limitations] + \
+        [f"（安全）{x}" for x in st.security_events]
     st.report = {**cleaned, "citations": stats, "confounder": confounder}
     if st.goal is not None:
         (ctx.run_dir / "report.md").write_text(render_markdown(st, claims, cleaned, stats, confounder), encoding="utf-8")
@@ -942,7 +1044,8 @@ def report(ctx: EpisodeContext) -> StepOutcome:
         "hypotheses": [h.model_dump(mode="json") for h in st.hypotheses],
         "evidence": [e.model_dump(mode="json") for e in st.evidence],
         "report": st.report, "info_needs": [n.model_dump(mode="json") for n in st.info_needs],
-        "budget": b.model_dump(),
+        "budget": b.model_dump(), "approvals": [a.model_dump(mode="json") for a in st.approvals],
+        "limitations": st.limitations, "security_events": st.security_events,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     details = [f"{c.id} {c.subject_site}{c.template_prefix}：{', '.join(c.change_types)}，信心 {c.confidence:.2f}，"
                f"證據 {', '.join(c.evidence_ids)}{'' if c.validated else '（未通過驗證）'}" for c in claims]

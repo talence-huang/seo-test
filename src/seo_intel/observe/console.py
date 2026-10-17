@@ -10,7 +10,7 @@ from seo_intel.observe.record import StepRecord
 
 _COLOR = {
     "DEFINE_GOAL": "magenta", "PLAN_INFO_NEEDS": "magenta", "SELECT_ACTION": "cyan", "EXECUTE_TOOL": "blue",
-    "PARSE_RESULT": "green", "DECIDE_NEXT": "yellow", "REPORT": "magenta",
+    "PARSE_RESULT": "green", "DECIDE_NEXT": "yellow", "REPORT": "magenta", "HUMAN_DECISION": "bright_red",
 }
 
 

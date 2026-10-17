@@ -6,6 +6,7 @@ import json
 from datetime import date
 from enum import StrEnum
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +24,7 @@ class Step(StrEnum):
     REPORT = "REPORT"
     REFLECT = "REFLECT"
     DONE = "DONE"
+    HUMAN_DECISION = "HUMAN_DECISION"   # 只出現在 trace：人工核准 / 拒絕的套用紀錄（不是狀態機的步驟）
 
 
 class Phase(StrEnum):
@@ -174,6 +176,36 @@ class Claim(BaseModel):
     validated: bool = False
 
 
+class Approval(BaseModel):
+    """一次人工核准請求（見 docs/06 §2.4）。決定寫回檢查點，續跑時套用。"""
+
+    id: str
+    rule: str
+    reason: str
+    kind: Literal["action", "budget"]
+    action: Action | None = None              # kind=action：被擋下的行動
+    extend: dict[str, float] = {}             # kind=budget：核准後延長的預算，例如 {"max_fetches": 12}
+    estimate: dict[str, Any] = {}             # 預估成本與用途，給人判斷
+    status: Literal["pending", "approved", "rejected", "expired", "used"] = "pending"
+    note: str | None = None
+    created_at: str
+    expires_at: str
+    decided_at: str | None = None
+
+    @property
+    def scope_key(self) -> str:
+        """人工拒絕後，同一範圍不再詢問：預算以資源為範圍，行動以網域為範圍。"""
+        if self.kind == "budget":
+            return next(iter(self.extend), "")
+        return action_scope(self.action) if self.action else ""
+
+
+def action_scope(action: Action) -> str:
+    if "url" in action.args:
+        return urlsplit(action.args["url"]).hostname or ""
+    return action.args.get("domain") or action.args.get("site") or ""
+
+
 class BudgetState(BaseModel):
     fetches: int = 0
     fetches_by_domain: dict[str, int] = {}
@@ -183,6 +215,7 @@ class BudgetState(BaseModel):
     actions: int = 0
     iterations: int = 0
     elapsed_s: float = 0.0          # 已累積的環境時間（續跑時延續）
+    extra: dict[str, float] = {}    # 經人工核准延長的上限（max_fetches、max_llm_usd、max_wall_time_s）
 
 
 class EpisodeState(BaseModel):
@@ -210,13 +243,22 @@ class EpisodeState(BaseModel):
     reflection: dict[str, Any] | None = None
     end_reason: str | None = None
     done_signatures: list[str] = []
+    failed_attempts: dict[str, int] = {}          # 行動簽章 → 暫時性失敗次數（行動層重試）
     fetched: dict[str, dict[str, Any]] = {}       # url → 頁面摘要
     fetch_yield: list[int] = []                   # 每次抓取是否產生證據候選（報酬遞減判斷）
     template_changes: dict[str, list[str]] = {}   # 範本 → 已確認有變動的網址
     serp_gainers: list[str] = []
     budget: BudgetState = BudgetState()
     clock_at: float = 0.0
-    approval_request: dict[str, Any] | None = None
+    approvals: list[Approval] = []                 # 所有核准請求（含已決定的，供稽核）
+    grants: list[dict[str, str]] = []              # 已核准、尚未使用的一次性授權 {approval, rule, signature}
+    denials: list[dict[str, str]] = []             # 人工拒絕的範圍 {approval, rule, scope}：之後直接拒絕、不再詢問
+    limitations: list[str] = []                    # 因拒絕或預算而未完成的工作，寫入報告「限制」
+    security_events: list[str] = []               # 疑似注入、來源不明網址等安全事件
+
+    @property
+    def pending_approval(self) -> Approval | None:
+        return next((a for a in reversed(self.approvals) if a.status == "pending"), None)
 
     def need(self, need_id: str) -> InfoNeed | None:
         return next((n for n in self.info_needs if n.id == need_id), None)

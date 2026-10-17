@@ -186,11 +186,15 @@ def test_template_sample_is_random_not_freshness_ranked(settings, tmp_path):
 def test_invalid_citations_and_claims_are_removed(settings, tmp_path):
     ctx = _ctx(build("s1"), settings, tmp_path)
     ctx.state.add_observation("rank_change", "r", {"site": "own-insure.sim"})
-    raw = {"headline": "結論 [C1] [O-1] [O-77]", "summary": "", "caveats": ["[EV-9]"], "recommendations": [],
+    raw = {"headline": "LLM 寫的標題 [C1]", "caveats": ["[EV-9]"], "recommendations": ["多寫 FAQ", "照 [C9] 做"],
+           "summary": "排名下滑 [C1] [O-1] [O-77]。對手做了關鍵字堆砌 [O-99]。對照組沒有變化。",
            "findings": [{"claim_id": "C9", "explanation": "x"}], "excluded": [{"hypothesis_id": "H9", "reason": "x"}]}
     cleaned, stats = validate_citations(raw, ctx.state, [])
-    assert cleaned["headline"].strip() == "結論  [O-1]".strip()
-    assert stats == {"valid": 1, "invalid_removed": 3, "dropped_findings": 1, "dropped_excluded": 1}
+    assert cleaned["headline"].startswith("沒有足夠證據下結論")       # 標題由程式依主張產生
+    assert cleaned["summary"] == "排名下滑 [O-1]。對照組沒有變化。"   # 引用全部無效的句子整句刪除
+    assert cleaned["caveats"] == [] and cleaned["recommendations"] == []
+    assert stats == {"valid": 1, "invalid_removed": 5, "dropped_findings": 1, "dropped_excluded": 1,
+                     "ungrounded_removed": 3, "instructions_removed": 0, "uncited_recommendations": 1}
 
 
 # ---------- 完整 episode：主張必須與標準答案一致 ----------

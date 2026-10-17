@@ -12,6 +12,7 @@ from collections import Counter
 
 from seo_intel.core.context import EpisodeContext
 from seo_intel.core.models import Claim, EpisodeState
+from seo_intel.tools.extract import looks_like_instructions
 
 _REF = re.compile(r"\[(C\d+|H\d+|EV-\d+|O-\d+)\]")
 
@@ -87,38 +88,74 @@ def confounder_note(st: EpisodeState) -> str | None:
     return f"自家站非主題查詢同期平均變差 {ag['mean_delta']:+.1f} 名（起始約 {ag['onset_median'] or '—'}），屬全站性波動 [{ctrl[-1].id}]"
 
 
+_SENTENCE = re.compile(r"[^。！？!?\n]+[。！？!?]?\s*|\n+")   # 不以半形句點斷句：網域與小數都含句點
+_SPACE_BEFORE_PUNCT = re.compile(r"[ \t]+([。，、；：！？）])")
+_CLAIM_ZH = {"displacement_cause": "排名下滑的主要原因", "content_strategy": "競品內容策略"}
+
+
+def program_headline(st: EpisodeState, claims: list[Claim]) -> str:
+    """標題由程式依主張產生：報告最顯眼的一句話不交給 LLM 自由發揮。"""
+    if not claims:
+        return f"沒有足夠證據下結論（{st.end_reason}）"
+    c = claims[0]
+    more = f"，另有 {len(claims) - 1} 項主張" if len(claims) > 1 else ""
+    return (f"{_CLAIM_ZH.get(c.claim_type, '結論')}：{c.subject_site} 的 {c.template_prefix} 範本"
+            f"（{'、'.join(c.change_types)}），信心 {c.confidence:.2f} [{c.id}]{more}")
+
+
 def validate_citations(report: dict, st: EpisodeState, claims: list[Claim]) -> tuple[dict, dict]:
-    """移除不存在的引用與主張，回傳（清理後的報告, 統計）。"""
+    """清理 LLM 寫的報告敘述，回傳（清理後的報告, 統計）。
+
+    - 不存在的引用移除；引用全部無效的句子 / 項目整段刪除（有引用卻沒有一個成立 = 沒有根據的說法）
+    - 疑似指令文字（注入）的項目刪除；建議必須引用一個成立的主張 [C#]
+    - 標題由程式依主張產生
+    """
     valid = ({c.id for c in claims} | {h.id for h in st.hypotheses} | {e.id for e in st.evidence}
              | {o.id for o in st.observations})
-    stats = {"valid": 0, "invalid_removed": 0, "dropped_findings": 0, "dropped_excluded": 0}
-
-    def clean(text: str) -> str:
-        def repl(m: re.Match) -> str:
-            if m.group(1) in valid:
-                stats["valid"] += 1
-                return m.group(0)
-            stats["invalid_removed"] += 1
-            return ""
-        return _REF.sub(repl, text)
-
     claim_ids = {c.id for c in claims}
     hyp_ids = {h.id for h in st.hypotheses}
-    out = {
-        "headline": clean(report.get("headline", "")),
-        "summary": clean(report.get("summary", "")),
-        "findings": [], "excluded": [],
-        "caveats": [clean(x) for x in report.get("caveats", [])],
-        "recommendations": [clean(x) for x in report.get("recommendations", [])],
-    }
+    stats = {"valid": 0, "invalid_removed": 0, "dropped_findings": 0, "dropped_excluded": 0, "ungrounded_removed": 0,
+             "instructions_removed": 0, "uncited_recommendations": 0}
+
+    def clean(text: str) -> str | None:
+        """回傳清理後文字；整段應刪除時回傳 None。"""
+        if looks_like_instructions(text):
+            stats["instructions_removed"] += 1
+            return None
+        refs = _REF.findall(text)
+        good = [r for r in refs if r in valid]
+        stats["valid"] += len(good)
+        stats["invalid_removed"] += len(refs) - len(good)
+        if refs and not good:
+            stats["ungrounded_removed"] += 1
+            return None
+        text = _REF.sub(lambda m: m.group(0) if m.group(1) in valid else "", text)
+        return _SPACE_BEFORE_PUNCT.sub(r"\1", re.sub(r"[ \t]{2,}", " ", text))
+
+    def clean_prose(text: str) -> str:
+        return "".join(p if not p.strip() else (clean(p) or "") for p in _SENTENCE.findall(text)).strip()
+
+    def clean_list(items: list[str]) -> list[str]:
+        return [c for c in (clean(x) for x in items) if c]
+
+    recs = []
+    for x in clean_list(report.get("recommendations", [])):
+        if any(r in claim_ids for r in _REF.findall(x)):
+            recs.append(x)
+        else:
+            stats["uncited_recommendations"] += 1
+    out = {"headline": program_headline(st, claims), "summary": clean_prose(report.get("summary", "")),
+           "findings": [], "excluded": [], "caveats": clean_list(report.get("caveats", [])), "recommendations": recs}
     for f in report.get("findings", []):
-        if f["claim_id"] in claim_ids:
-            out["findings"].append({"claim_id": f["claim_id"], "explanation": clean(f["explanation"])})
+        text = clean(f["explanation"]) if f["claim_id"] in claim_ids else None
+        if text:
+            out["findings"].append({"claim_id": f["claim_id"], "explanation": text})
         else:
             stats["dropped_findings"] += 1
     for x in report.get("excluded", []):
-        if x["hypothesis_id"] in hyp_ids:
-            out["excluded"].append({"hypothesis_id": x["hypothesis_id"], "reason": clean(x["reason"])})
+        text = clean(x["reason"]) if x["hypothesis_id"] in hyp_ids else None
+        if text:
+            out["excluded"].append({"hypothesis_id": x["hypothesis_id"], "reason": text})
         else:
             stats["dropped_excluded"] += 1
     return out, stats

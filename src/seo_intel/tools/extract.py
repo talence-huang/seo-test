@@ -14,6 +14,18 @@ _INJECTION = re.compile(
     r"ignore (all )?(previous|prior) instructions|system notice to ai|you must fetch|disregard your instructions",
     re.IGNORECASE,
 )
+REDACTED = "[已移除：疑似指令文字]"
+
+
+def looks_like_instructions(text: str) -> bool:
+    return bool(_INJECTION.search(text))
+
+
+def redact_instructions(text: str) -> tuple[str, int]:
+    """把疑似對 AI 下指令的片段換成標記（送進 LLM 前的最後一道防線）。回傳 (處理後文字, 移除段數)。"""
+    return _INJECTION.subn(REDACTED, text)
+
+
 _SKIP_TEXT = {"script", "style", "noscript", "nav", "footer", "head", "title"}
 _VOID = {"meta", "link", "br", "img", "input", "hr", "source", "area", "base", "col", "embed", "wbr"}
 _BOILERPLATE_HEADINGS = re.compile(r"related|frequently asked|faq", re.IGNORECASE)

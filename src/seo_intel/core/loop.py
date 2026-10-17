@@ -41,8 +41,8 @@ class ResearchLoop:
             if st.status == "waiting_approval":
                 break
             safe_point = step != Step.EXECUTE_TOOL   # 工具結果尚未解析前不能暫停或存檔
-            if safe_point and st.seq % self.checkpoint_every == 0:
-                save_checkpoint(self.ctx)
+            if safe_point and (st.seq % self.checkpoint_every == 0 or record.llm):
+                save_checkpoint(self.ctx)   # 呼叫過 LLM 的步驟立即存檔：程序中斷時不必重付最貴的部分
             if self.step_hook is not None and not quit_requested and not self.step_hook(record):
                 quit_requested = True
             if quit_requested and safe_point:
@@ -50,6 +50,16 @@ class ResearchLoop:
                 break
         self._finish()
         return st
+
+    def note(self, summary: str, details: list[str]) -> StepRecord:
+        """把狀態機之外發生的事（人工核准 / 拒絕）寫進 trace，不影響狀態轉移。"""
+        st = self.ctx.state
+        st.seq += 1
+        st.clock_at = self.ctx.clock.now()
+        record = make_record(self.ctx, Step.HUMAN_DECISION, StepOutcome(summary=summary, details=details))
+        for o in self.observers:
+            o.emit(record)
+        return record
 
     def _record(self, step: Step, outcome: StepOutcome) -> StepRecord:
         st = self.ctx.state

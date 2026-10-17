@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from seo_intel.core.models import EpisodeState
 from seo_intel.observe.record import StepRecord
 from seo_intel.store import Database
@@ -73,6 +75,7 @@ class DbRecorder:
             conn.execute("UPDATE episodes SET status = ?, budget_json = ?, ended_at = ? WHERE id = ?",
                          (state.status, state.budget.model_dump_json(),
                           utc_now() if state.status in ("done", "failed") else None, state.id))
+        record_approvals(self.db, state)
         if state.status != "done":
             return
         now, eid = utc_now(), state.id
@@ -99,3 +102,15 @@ class DbRecorder:
                 "id": f"{eid}/{c.id}", "episode_id": eid, "claim_json": c.model_dump(mode="json"),
                 "confidence": c.confidence, "evidence_ids_json": c.evidence_ids, "validated": c.validated,
             })
+
+
+def record_approvals(db: Database, state: EpisodeState) -> None:
+    """核准請求的稽核紀錄（決定以檢查點為準，這裡是可查詢的鏡像）。"""
+    with db.transaction() as conn:
+        for a in state.approvals:
+            action = a.action.model_dump(mode="json") if a.action else {"kind": "budget", "extend": a.extend}
+            conn.execute(
+                """INSERT OR REPLACE INTO approvals (id, episode_id, action_json, reason, est_cost_json, status, note,
+                       created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (a.id, state.id, json.dumps(action, ensure_ascii=False), f"[{a.rule}] {a.reason}",
+                 json.dumps(a.estimate, ensure_ascii=False), a.status, a.note, a.created_at, a.expires_at))

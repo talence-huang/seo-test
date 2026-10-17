@@ -182,6 +182,27 @@ def _memory_section(state: dict) -> str:
             + (f"<h3>REFLECT：本次學到什麼</h3><ul>{lines}</ul>" if lines else ""))
 
 
+_APPROVAL_ZH = {"pending": "待決定", "approved": "已核准", "rejected": "已拒絕", "expired": "已過期", "used": "已使用"}
+
+
+def _autonomy_section(state: dict) -> str:
+    """自治邊界：核准請求、限制、安全事件。"""
+    aps = state.get("approvals") or []
+    lim, sec = state.get("limitations") or [], state.get("security_events") or []
+    if not (aps or lim or sec):
+        return ""
+    rows = "".join(
+        f"<tr><td>{_e(a['id'])}</td><td><code>{_e(a['rule'])}</code></td><td>{_e(a['reason'])}</td>"
+        f"<td>{_e(json.dumps(a.get('estimate') or a.get('extend'), ensure_ascii=False))}</td>"
+        f"<td>{_APPROVAL_ZH.get(a['status'], a['status'])}</td><td>{_e(a.get('note') or '—')}</td></tr>" for a in aps)
+    html = "<h2>自治邊界（人工核准、限制、安全事件）</h2>"
+    if rows:
+        html += ("<div class='wrap'><table><tr><th>核准 ID</th><th>規則</th><th>理由</th><th>預估</th><th>狀態</th>"
+                 f"<th>備註</th></tr>{rows}</table></div>")
+    html += "".join(f"<p>限制：{_e(x)}</p>" for x in lim) + "".join(f"<p>⚠ 安全：{_e(x)}</p>" for x in sec)
+    return html
+
+
 def render_timeline(records: list[StepRecord], state: dict, frontier: dict | None,
                     environment: dict | None = None) -> str:
     task, goal = state["task"], state.get("goal") or {}
@@ -219,6 +240,7 @@ def render_timeline(records: list[StepRecord], state: dict, frontier: dict | Non
 <div class="cards">{''.join(f'<div class="card"><span>{_e(k)}</span><b>{_e(v)}</b></div>' for k, v in cards)}</div>
 {_research_sections(state)}
 {_memory_section(state)}
+{_autonomy_section(state)}
 <h2>資訊需求</h2><div class="wrap"><table><tr><th>ID</th><th>類型</th><th>優先</th><th>目標網域</th><th>問題</th><th>狀態</th><th>解答</th></tr>{needs}</table></div>
 <h2>抓取預算隨步驟累積（底色＝階段）</h2>{_budget_svg(records, cap)}
 <h2>範本統計（Frontier）{excluded}</h2><div class="wrap"><table><tr><th>範本</th><th>URL 數</th><th>期間內更新</th><th>已抓取</th><th>證據</th><th>證據率</th><th>封鎖</th><th>陷阱</th><th>記憶（M2 先驗／M1 避開）</th></tr>{tpl_rows}</table></div>

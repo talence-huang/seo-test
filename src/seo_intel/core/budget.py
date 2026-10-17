@@ -21,13 +21,34 @@ class BudgetLedger:
         self.clock = clock
         self._t0 = clock.now() - state.elapsed_s
 
+    # ---------- 有效上限（設定值 + 人工核准的延長） ----------
+
+    @property
+    def max_fetches(self) -> int:
+        return self.cfg.max_fetches + int(self.state.extra.get("max_fetches", 0))
+
+    @property
+    def max_fetches_per_domain(self) -> int:
+        return self.cfg.max_fetches_per_domain + int(self.state.extra.get("max_fetches", 0))
+
+    @property
+    def max_llm_usd(self) -> float:
+        return self.cfg.max_llm_usd + self.state.extra.get("max_llm_usd", 0.0)
+
+    @property
+    def max_wall_time_s(self) -> float:
+        return self.cfg.max_wall_time_s + self.state.extra.get("max_wall_time_s", 0.0)
+
+    def cap(self, resource: str) -> float:
+        return getattr(self, resource)
+
     # ---------- 階段額度 ----------
 
     def fetch_cap(self, phase: Phase) -> int:
         """累進制：到這個階段為止可用的抓取總數。"""
         shares = self.cfg.phases.model_dump()
         upto = sum(shares[p.value] for p in PHASE_ORDER[: PHASE_ORDER.index(phase) + 1])
-        return round(self.cfg.max_fetches * upto)
+        return round(self.max_fetches * upto)
 
     def fetch_room(self, phase: Phase) -> int:
         return max(0, self.fetch_cap(phase) - self.state.fetches)
@@ -36,14 +57,14 @@ class BudgetLedger:
 
     def can_fetch(self, domain: str, n: int = 1) -> bool:
         s = self.state
-        return (s.fetches + n <= self.cfg.max_fetches
-                and s.fetches_by_domain.get(domain, 0) + n <= self.cfg.max_fetches_per_domain)
+        return (s.fetches + n <= self.max_fetches
+                and s.fetches_by_domain.get(domain, 0) + n <= self.max_fetches_per_domain)
 
     def can_call_api(self, n: int = 1) -> bool:
         return self.state.api_calls + n <= self.cfg.max_api_calls
 
     def llm_left(self) -> float:
-        return self.cfg.max_llm_usd - self.state.llm_usd
+        return self.max_llm_usd - self.state.llm_usd
 
     def elapsed(self) -> float:
         return self.clock.now() - self._t0
@@ -51,11 +72,11 @@ class BudgetLedger:
     def exhausted_reason(self) -> str | None:
         """回傳已用盡的硬上限名稱；未用盡則為 None。"""
         s = self.state
-        if s.fetches >= self.cfg.max_fetches:
+        if s.fetches >= self.max_fetches:
             return "max_fetches"
-        if s.llm_usd >= self.cfg.max_llm_usd:
+        if s.llm_usd >= self.max_llm_usd:
             return "max_llm_usd"
-        if self.elapsed() >= self.cfg.max_wall_time_s:
+        if self.elapsed() >= self.max_wall_time_s:
             return "max_wall_time_s"
         if s.actions >= self.cfg.max_actions:
             return "max_actions"
@@ -90,12 +111,12 @@ class BudgetLedger:
         return {
             "phase": phase.value,
             "fetches": s.fetches,
-            "fetch_cap": self.cfg.max_fetches,
+            "fetch_cap": self.max_fetches,
             "phase_cap": self.fetch_cap(phase),
             "api_calls": s.api_calls,
             "api_cap": self.cfg.max_api_calls,
             "llm_usd": round(s.llm_usd, 6),
-            "llm_cap": self.cfg.max_llm_usd,
+            "llm_cap": self.max_llm_usd,
             "actions": s.actions,
             "elapsed_s": round(self.elapsed(), 1),
         }

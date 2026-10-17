@@ -49,7 +49,8 @@ def build_context(state: EpisodeState, settings: Settings, llm: LLMClient, clien
     ctx = EpisodeContext(state=state, settings=settings, llm=llm, http=http, ledger=ledger, policy=None,
                          rank=RankClient(http), archive=ArchiveClient(http), clock=clock, run_dir=run_dir,
                          frontier=frontier, memory=memory)
-    ctx.policy = PolicyGate(settings.policy, state.task, http, ledger, block_rate=lambda d: _block_rate(ctx, d))
+    ctx.policy = PolicyGate(settings.policy, state.task, http, ledger, block_rate=lambda d: _block_rate(ctx, d),
+                            state=state, known_url=lambda u: _known_url(ctx, u))
     if frontier is not None and state.goal is not None and memory is not None:   # 續跑：重新接上記憶
         from seo_intel.core.steps import memory_setup
 
@@ -57,12 +58,24 @@ def build_context(state: EpisodeState, settings: Settings, llm: LLMClient, clien
     return ctx
 
 
+def _known_url(ctx: EpisodeContext, url: str) -> bool:
+    """網址必須是程式從 sitemap、連結或 SERP 取得的（在 frontier 中），頁面文字或 LLM 輸出不能直接變成抓取目標。"""
+    from seo_intel.core.frontier import normalize_url
+
+    return ctx.frontier is not None and normalize_url(url) in ctx.frontier.entries
+
+
 def save_checkpoint(ctx: EpisodeContext) -> Path:
-    path = ctx.run_dir / CHECKPOINT
+    return write_checkpoint(ctx.run_dir, ctx.state, ctx.frontier)
+
+
+def write_checkpoint(run_dir: Path, state: EpisodeState, frontier: Frontier | None) -> Path:
+    """原子寫入（先寫暫存檔再取代），程序在寫入途中被中斷也不會留下損壞的檢查點。"""
+    path = run_dir / CHECKPOINT
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps({
-        "state": ctx.state.model_dump(mode="json"),
-        "frontier": ctx.frontier.to_dict() if ctx.frontier else None,
+        "state": state.model_dump(mode="json"),
+        "frontier": frontier.to_dict() if frontier else None,
     }, ensure_ascii=False), encoding="utf-8")
     tmp.replace(path)
     return path

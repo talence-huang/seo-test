@@ -187,6 +187,7 @@ def test_policy_gate_rules(settings, tmp_path):
     sim = build("s1")
     ctx = _ctx(sim, settings, tmp_path)
     fetch = lambda url: Action(tool="fetch", args={"url": url}, phase=Phase.SAMPLING, score=1, reason="t")  # noqa: E731
+    ctx.policy.known_url = lambda url: True   # 網址來源規則另見 tests/test_autonomy.py
     assert ctx.policy.check(fetch("https://shieldguide.sim/guide/x-1")).decision == "allow"
     deny = ctx.policy.check(fetch("https://shieldguide.sim/search?q=x"))
     assert (deny.decision, deny.rule) == ("deny", "ignore_robots")

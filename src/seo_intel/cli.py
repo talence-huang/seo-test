@@ -28,6 +28,7 @@ research_app = typer.Typer(help="執行研究 episode（seo-intel research --sce
 trace_app = typer.Typer(help="檢視研究過程", no_args_is_help=True)
 memory_app = typer.Typer(help="記憶（M1 經驗庫、M2 URL 價值）", no_args_is_help=True)
 feedback_app = typer.Typer(help="人工糾偏", no_args_is_help=True)
+approvals_app = typer.Typer(help="人工核准（需核准的動作會讓 episode 存檔暫停）", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(config_app, name="config")
 app.add_typer(llm_app, name="llm")
@@ -36,6 +37,7 @@ app.add_typer(research_app, name="research")
 app.add_typer(trace_app, name="trace")
 app.add_typer(memory_app, name="memory")
 app.add_typer(feedback_app, name="feedback")
+app.add_typer(approvals_app, name="approvals")
 
 console = Console()
 DbPath = Annotated[Path, typer.Option("--path", help="SQLite 檔案路徑")]
@@ -273,6 +275,8 @@ VerboseOpt = Annotated[bool, typer.Option("--verbose", help="也顯示例行的�
 MemoryOpt = Annotated[Path | None, typer.Option("--memory", help="記憶資料庫（跨 episode 共用，預設 data/memory.db）")]
 NoMemoryOpt = Annotated[bool, typer.Option("--no-memory", help="不使用記憶（相當於 Day 1）")]
 AblateOpt = Annotated[str, typer.Option("--ablate", help="關閉部分記憶做消融實驗，例如 M1 或 M1,M2")]
+MaxFetchesOpt = Annotated[int | None, typer.Option("--max-fetches", help="覆寫抓取預算（例如緊縮預算實驗）")]
+MaxLlmOpt = Annotated[float | None, typer.Option("--max-llm-usd", help="覆寫 LLM 花費上限（US$）")]
 
 
 def _default_memory() -> Path:
@@ -281,20 +285,14 @@ def _default_memory() -> Path:
     return DEFAULT_MEMORY
 
 
-def _open_memory(run_dir: Path, path: Path | None, ablate: str, *, resumed: bool):
-    """開啟記憶並把設定寫入 run 目錄（續跑時沿用同一份記憶設定）。"""
-    from seo_intel.core.runner import open_memory
+def _new_run_config(run_dir: Path, memory: Path | None, ablate: str, budget: dict) -> dict:
+    """把記憶與預算設定寫入 run 目錄（run.json），續跑時沿用同一份設定。"""
+    from seo_intel.core.runner import save_run_config
 
-    cfg_path = run_dir / "memory.json"
-    if resumed and cfg_path.is_file():
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        path, flags = (Path(cfg["path"]) if cfg["path"] else None), frozenset(cfg["ablate"])
-    else:
-        flags = frozenset(x.strip().upper() for x in ablate.split(",") if x.strip())
-        if bad := flags - {"M1", "M2"}:
-            raise typer.BadParameter(f"--ablate 只接受 M1、M2：{', '.join(sorted(bad))}")
-        cfg_path.write_text(json.dumps({"path": str(path) if path else None, "ablate": sorted(flags)}), encoding="utf-8")
-    return open_memory(path, flags)
+    flags = sorted({x.strip().upper() for x in ablate.split(",") if x.strip()})
+    if bad := set(flags) - {"M1", "M2"}:
+        raise typer.BadParameter(f"--ablate 只接受 M1、M2：{', '.join(sorted(bad))}")
+    return save_run_config(run_dir, memory, flags, {k: v for k, v in budget.items() if v is not None})
 
 
 class StepPrompter:
@@ -327,7 +325,24 @@ def _make_llm(mode: str, settings, run_dir: Path, cassette: Path | None):
     raise typer.BadParameter(f"未知的 --llm 模式：{mode}")
 
 
-def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path, resumed: bool) -> None:
+def _ask_inline(ectx) -> list[str] | None:
+    """--step 模式遇到需核准的動作：當場詢問。回傳套用結果；選擇稍後再決定則回傳 None（存檔離開）。"""
+    from seo_intel.core import approvals
+
+    a = ectx.state.pending_approval
+    console.print(f"\n[bold yellow]需要人工核准 {a.id}[/]（規則 {a.rule}）：{escape(a.reason)}")
+    if a.estimate:
+        console.print(f"  預估：{escape(json.dumps(a.estimate, ensure_ascii=False))}", highlight=False)
+    answer = console.input("  y 核准｜n 拒絕｜Enter 稍後再決定（存檔離開）： ").strip().lower()
+    if answer not in ("y", "n"):
+        return None
+    note = console.input("  備註（可留空）： ").strip() or None
+    approvals.decide(ectx.state, a.id, answer == "y", note)
+    return approvals.resume(ectx)
+
+
+def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path, resumed: bool,
+             notes: list[str] | None = None) -> None:
     from seo_intel.core.loop import ResearchLoop
     from seo_intel.observe.console import ConsoleObserver
     from seo_intel.observe.store import DbRecorder
@@ -343,13 +358,20 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
         observers.insert(0, ConsoleObserver(console, verbose))
     console.rule(f"[bold]Episode {st.id}{'（續跑）' if resumed else ''}")
     console.print(f"[bold]任務[/]：{st.task.question}")
-    console.print(f"自家站 {st.task.own_site} · 競品 {', '.join(st.task.competitors)} · 今天 {st.task.today}\n")
+    console.print(f"自家站 {st.task.own_site} · 競品 {', '.join(st.task.competitors)} · 今天 {st.task.today}")
+    ledger = ectx.ledger
+    console.print(f"預算：抓取 {ledger.max_fetches} 次、LLM US${ledger.max_llm_usd:.2f}、API {ledger.cfg.max_api_calls} 次")
     mem = ectx.memory
     console.print(f"記憶：{mem.store.path}（M1 {'開' if mem.use_m1 else '關'}、M2 {'開' if mem.use_m2 else '關'}）\n"
                   if mem else "記憶：未啟用（Day 1）\n")
     loop = ResearchLoop(ectx, observers, step_hook=StepPrompter(console) if step else None)
     try:
+        if notes:
+            loop.note(f"人工決定 {notes[0]}", notes[1:])
         loop.run()
+        while step and st.status == "waiting_approval" and (lines := _ask_inline(ectx)):
+            loop.note(f"人工決定 {lines[0]}", lines[1:])
+            loop.run()
     finally:
         db.close()
         _write_artifacts(ectx, sim)
@@ -366,7 +388,13 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
     if loop.paused or st.status == "running":
         console.print(f"[yellow]已暫停[/]，續跑：seo-intel research resume {st.id}")
     if st.status == "waiting_approval":
-        console.print(f"[yellow]等待人工核准[/]：{st.approval_request['reason']}（核准指令於 Phase 5 實作）")
+        a = st.pending_approval
+        console.print(f"[yellow]等待人工核准 {a.id}[/]（{a.rule}）：{escape(a.reason)}")
+        console.print(f"  核准：seo-intel approvals approve {a.id}　拒絕：seo-intel approvals reject {a.id}"
+                      f"　期限 {a.expires_at}")
+        console.print(f"  決定後續跑：seo-intel research resume {st.id}")
+    if st.limitations:
+        console.print("[yellow]限制[/]：" + "；".join(escape(x) for x in st.limitations))
 
 
 def _write_artifacts(ectx, sim) -> None:
@@ -395,6 +423,8 @@ def research(
     memory: MemoryOpt = None,
     no_memory: NoMemoryOpt = False,
     ablate: AblateOpt = "",
+    max_fetches: MaxFetchesOpt = None,
+    max_llm_usd: MaxLlmOpt = None,
 ) -> None:
     """在 SimWeb 情境中執行一個研究 episode。"""
     if typer_ctx.invoked_subcommand:
@@ -403,18 +433,16 @@ def research(
         console.print("請指定 --scenario（例如 --scenario s1），或使用 seo-intel research resume <episode>")
         raise typer.Exit(1)
     from seo_intel.core.episode import RUNS_DIR, build_context, new_state
-    from seo_intel.core.models import TaskInput
+    from seo_intel.core.runner import apply_run_config, scenario_task
     from simweb import build
 
-    settings = get_settings()
     sim = build(scenario)
-    g = sim.spec.goal
-    task = TaskInput(scenario=scenario, question=g.question, own_site=g.own_site, competitors=list(g.competitors),
-                     today=sim.spec.now, period_hint=g.window)
-    state = new_state(task, sim.clock)
+    state = new_state(scenario_task(sim), sim.clock)
     run_dir = RUNS_DIR / state.id
     run_dir.mkdir(parents=True, exist_ok=True)
-    mem = _open_memory(run_dir, None if no_memory else (memory or _default_memory()), ablate, resumed=False)
+    cfg = _new_run_config(run_dir, None if no_memory else (memory or _default_memory()), ablate,
+                          {"max_fetches": max_fetches, "max_llm_usd": max_llm_usd})
+    settings, mem = apply_run_config(get_settings(), cfg)
     ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, cassette), sim.client(), sim.clock, run_dir,
                          memory=mem)
     _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
@@ -429,8 +457,10 @@ def research_resume(
     verbose: VerboseOpt = False,
     path: DbPath = DEFAULT_DB,
 ) -> None:
-    """從檢查點續跑一個暫停中的 episode。"""
+    """從檢查點續跑：手動暫停、程序中斷，或人工核准 / 拒絕之後。"""
+    from seo_intel.core import approvals
     from seo_intel.core.episode import RUNS_DIR, build_context, load_checkpoint
+    from seo_intel.core.runner import apply_run_config, load_run_config
     from seo_intel.observe.trace import truncate_trace
     from simweb import VirtualClock, build
 
@@ -442,16 +472,19 @@ def research_resume(
     if state.status in ("done", "failed"):
         console.print(f"Episode 已結束（{state.status}），無需續跑")
         raise typer.Exit(0)
-    if state.status == "waiting_approval":
-        console.print(f"[yellow]Episode 等待人工核准[/]：{state.approval_request['reason']}（核准指令於 Phase 5 實作）")
-        raise typer.Exit(1)
-    settings = get_settings()
+    settings, mem = apply_run_config(get_settings(), load_run_config(run_dir))
     sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at))
-    truncate_trace(run_dir / "trace.jsonl", state.seq)
-    mem = _open_memory(run_dir, _default_memory(), "", resumed=True)
     ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, None), sim.client(), sim.clock, run_dir,
                          frontier, memory=mem)
-    _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=True)
+    try:
+        notes = approvals.resume(ectx)
+    except approvals.ApprovalPending as e:
+        console.print(f"[yellow]{escape(str(e))}[/]")
+        if mem:
+            mem.store.close()
+        raise typer.Exit(1) from None
+    truncate_trace(run_dir / "trace.jsonl", state.seq)
+    _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=True, notes=notes)
 
 
 # ---------- 檢視研究過程 ----------
@@ -608,6 +641,87 @@ def memory_retire(
     store.event(x.id, None, "retired", x.retired_reason)
     store.close()
     console.print(f"已淘汰 {lesson_id}：{reason}")
+
+
+# ---------- 人工核准 ----------
+
+def _episode_dirs():
+    from seo_intel.core.episode import RUNS_DIR
+
+    return [d for d in sorted(RUNS_DIR.glob("E-*"), reverse=True) if (d / "checkpoint.json").is_file()]
+
+
+def _find_approval(key: str):
+    """依核准 ID（A-xxxxxx）或 episode ID（取其待決定的請求）找出核准請求。"""
+    from seo_intel.core.episode import load_checkpoint
+
+    for d in _episode_dirs():
+        if key.startswith("E-") and d.name != key:
+            continue
+        st, fr = load_checkpoint(d)
+        a = st.pending_approval if key.startswith("E-") else next((x for x in st.approvals if x.id == key), None)
+        if a is not None:
+            return d, st, fr, a
+    console.print(f"[red]找不到核准請求[/]：{key}（可用 seo-intel approvals list 查看）")
+    raise typer.Exit(1)
+
+
+@approvals_app.command("list")
+def approvals_list(show_all: Annotated[bool, typer.Option("--all", help="也列出已決定、已使用、已過期的請求")] = False) -> None:
+    """列出核准請求（預設只列待決定的）。"""
+    from seo_intel.core.episode import load_checkpoint
+
+    t = Table("核准 ID", "Episode", "規則", "理由", "預估", "狀態", "期限 / 決定", title="人工核准")
+    for d in _episode_dirs():
+        st, _ = load_checkpoint(d)
+        for a in st.approvals:
+            if a.status != "pending" and not show_all:
+                continue
+            when = a.expires_at if a.status == "pending" else f"{a.decided_at or '—'}（{a.note or '無備註'}）"
+            t.add_row(a.id, st.id, a.rule, a.reason, json.dumps(a.estimate, ensure_ascii=False), a.status, when)
+    console.print(t)
+
+
+def _decide(key: str, approve: bool, note: str | None, path: Path) -> None:
+    from seo_intel.core import approvals
+    from seo_intel.core.episode import write_checkpoint
+    from seo_intel.observe.store import record_approvals
+
+    run_dir, st, frontier, a = _find_approval(key)
+    try:
+        a = approvals.decide(st, a.id, approve, note)
+    except ValueError as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        raise typer.Exit(1) from None
+    write_checkpoint(run_dir, st, frontier)
+    if path.is_file():
+        db = Database(path)
+        if db.query("SELECT id FROM episodes WHERE id = ?", (st.id,)):
+            record_approvals(db, st)
+        db.close()
+    label = {"approved": "[green]已核准[/]", "rejected": "[red]已拒絕[/]", "expired": "[yellow]已過期，無法核准[/]"}
+    console.print(f"{label[a.status]} {a.id}（{a.rule}）：{escape(a.reason)}")
+    console.print(f"續跑：seo-intel research resume {st.id}")
+
+
+@approvals_app.command("approve")
+def approvals_approve(
+    key: Annotated[str, typer.Argument(help="核准 ID（A-xxxxxx）或 episode ID")],
+    note: Annotated[str | None, typer.Option("--note", help="備註（寫入稽核紀錄）")] = None,
+    path: DbPath = DEFAULT_DB,
+) -> None:
+    """核准一個請求（一次性、限定範圍、有期限）。"""
+    _decide(key, True, note, path)
+
+
+@approvals_app.command("reject")
+def approvals_reject(
+    key: Annotated[str, typer.Argument(help="核准 ID（A-xxxxxx）或 episode ID")],
+    note: Annotated[str | None, typer.Option("--note", help="備註（寫入報告的限制說明）")] = None,
+    path: DbPath = DEFAULT_DB,
+) -> None:
+    """拒絕一個請求：Agent 改走降級路徑，之後同一規則、同一範圍不再詢問。"""
+    _decide(key, False, note, path)
 
 
 # ---------- 人工糾偏 ----------

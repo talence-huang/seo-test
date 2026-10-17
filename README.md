@@ -13,7 +13,8 @@
 | 2 | 研究迴圈與可觀察性（狀態機、工具層、Frontier、預算、PolicyGate 基本版、即時主控台、trace、timeline、暫停續跑） | 完成 |
 | 3 | 假設、證據與報告（可證偽假設、6 種證據探針、log-odds 信心、紅隊驗證、結構化主張、引用驗證） | 完成 |
 | 4 | 學習機制（M1 經驗庫、M2 URL 價值、REFLECT、人工糾偏、經驗治理） | 完成（FakeLLM 驗證：s1 連跑抓取 69 → 49 → 38） |
-| 5–6 | 自治邊界、評測 | 未開始 |
+| 5 | 自治邊界與失效處置（完整 PolicyGate、人工核准流程、注入防護、混沌測試） | 完成（被攻陷的 LLM 也無法讓 Agent 越界或改變結論） |
+| 6 | 評測與研究成果收斂 | 未開始 |
 
 ## 安裝
 
@@ -36,8 +37,12 @@ seo-intel simweb list                    # 列出研究情境
 seo-intel simweb inspect --scenario s1   # 情境細節、標準答案、植入效應可觀察性
 seo-intel simweb fetch -s s1 <網址>      # 在模擬世界中抓取一個網址
 seo-intel research --scenario s1 --step  # 逐步觀察研究迴圈（--llm fake 免費）
-seo-intel research resume <episode>      # 從檢查點續跑（沿用原本的記憶設定）
+seo-intel research resume <episode>      # 從檢查點續跑（沿用原本的記憶與預算設定；先套用人工核准的決定）
 seo-intel research -s s1 --no-memory     # 不用記憶（Day 1）；--memory <檔案> 指定記憶、--ablate M1,M2 消融
+seo-intel research -s s1 --max-fetches 30 --step   # 緊縮預算：預算用盡時暫停請求核准（--step 可當場決定）
+seo-intel approvals list                 # 待核准的請求（--all 含已決定的）
+seo-intel approvals approve <A-id|episode> --note "..."   # 核准（一次性、24 小時內有效）
+seo-intel approvals reject <A-id|episode> --note "..."    # 拒絕：改走降級路徑並寫入報告限制
 seo-intel memory list                    # 經驗庫：狀態、來源、支持數、套用成效（--all 含已淘汰）
 seo-intel memory show L-1                # 一條經驗的內容與稽核軌跡
 seo-intel memory stats                   # M2 範本價值與 episode 成效

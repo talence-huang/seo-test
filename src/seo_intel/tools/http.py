@@ -139,10 +139,11 @@ class HttpToolkit:
                 self.attempts_log.append(AttemptRecord(url, None, error, attempt, self.clock.now(), waited))
                 self.clock.sleep(2 ** attempt)
                 continue
-            except httpx.HTTPError as e:
+            except httpx.HTTPError as e:   # 連線失敗多半是暫時性的：與逾時一樣退避後重試
                 status, error, text = None, f"connect_error: {e}", None
                 self.attempts_log.append(AttemptRecord(url, None, error, attempt, self.clock.now(), waited))
-                break
+                self.clock.sleep(2 ** attempt)
+                continue
             status, text = r.status_code, r.text
             error = None if status == 200 else f"http_{status}"
             self.attempts_log.append(AttemptRecord(url, status, error, attempt, self.clock.now(), waited))

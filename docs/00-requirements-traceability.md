@@ -31,11 +31,11 @@
 
 | 需求 | 設計 | 模組 | 觀察 / 驗證 | 狀態 |
 |---|---|---|---|---|
-| 失效模式：反爬、幻覺、Tool 崩潰、錯誤經驗 | [06 §1](06-reliability-and-autonomy.md) F1–F4 | `tools/http.py`、`core/claims.py`、`memory/reflect.py`、`memory/correct.py` | 06 §3 測試矩陣 | 🔄 反爬（F1）、幻覺防護（F2：引用驗證、數字由程式算、紅隊）、工具崩潰（F3）、錯誤經驗（F4：衝突淘汰、人工糾偏回溯）已實作並測試 |
-| 其他失效模式 | F5–F7 | 各模組 | 同上 | ⬜ |
-| 可 100% 自主的動作 | [06 §2.2](06-reliability-and-autonomy.md) | `core/policy.py` | 測試矩陣 | ⬜ |
-| 高風險動作須暫停等待人工核准 | 同上「需核准」 | `core/policy.py`、`cli.py` | 暫停 → 核准 → 續跑測試；主控台顯示擋下理由 | ⬜ |
-| 由程式強制 | `PolicyGate` | `core/policy.py` | LLM 輸出無法改變判定的測試 | ⬜ |
+| 失效模式：反爬、幻覺、Tool 崩潰、錯誤經驗 | [06 §1](06-reliability-and-autonomy.md) F1–F4 | `tools/http.py`、`core/claims.py`、`core/steps.py`、`memory/reflect.py` | 06 §3 測試矩陣；`tests/test_failures.py`、`tests/test_memory.py` | ✅ |
+| 其他失效模式 | F5–F7（預算失控、prompt injection、LLM API 錯誤） | `core/budget.py`、`core/policy.py`、`llm/` | 被攻陷的 LLM、注入頁、LLM / 網路 / 解析器混沌、程序硬中斷 | ✅ |
+| 可 100% 自主的動作 | [06 §2.2](06-reliability-and-autonomy.md) | `core/policy.py` | `tests/test_autonomy.py` 判定矩陣 | ✅ |
+| 高風險動作須暫停等待人工核准 | 同上「需核准」；預算延長附預估成本 | `core/approvals.py`、`cli.py` | 暫停 → 核准 / 拒絕 / 過期 → 續跑測試；`--step` 當場核准；trace 的 `HUMAN_DECISION` | ✅ |
+| 由程式強制 | `PolicyGate`（fail-closed）；工具名稱是封閉型別 | `core/policy.py` | 被攻陷的 LLM 無法越界或改變結論；LLM 無法發明工具 | ✅ |
 
 ## 展示劇本
 
@@ -63,4 +63,4 @@ seo-intel eval compare day1 dayN --ablate M1,M2
 2. 開啟 `timeline.html` 檢視完整決策過程（A）。
 3. 給一次人工糾偏後重跑，比較兩次的經驗套用、抓取數與成本（B）。
 4. 檢視 Day 1 vs Day N 評測與消融（B）。
-5. 觸發一次超預算 → 暫停 → 核准 → 續跑，並確認注入頁被忽略（C）。
+5. 以緊縮預算（`--max-fetches 30 --step`）觸發一次超預算 → 當場核准或拒絕 → 續跑，並在 timeline 的「自治邊界」區段檢查核准紀錄與限制（C）。
