@@ -84,12 +84,14 @@ def write_artifacts(ctx: EpisodeContext, sim) -> dict:
 def run_scenario(scenario: str, settings: Settings, llm_factory: Callable[[Path], LLMClient], *,
                  memory: MemorySession | None = None, run_root: Path = RUNS_DIR,
                  observers: Callable[[EpisodeContext], list[Observer]] | None = None,
-                 step_hook: StepHook | None = None, artifacts: bool = True) -> RunResult:
+                 step_hook: StepHook | None = None, artifacts: bool = True, seed: int | None = None) -> RunResult:
+    """seed 覆寫 SimWeb 的世界種子（同樣的因果結構、不同的網址與雜訊），評測用來增加樣本。"""
     from seo_intel.observe.trace import TraceWriter
     from simweb import build
 
-    sim = build(scenario)
+    sim = build(scenario, seed=seed)
     state = new_state(scenario_task(sim), sim.clock)
+    state.world_seed = seed
     run_dir = run_root / state.id
     run_dir.mkdir(parents=True, exist_ok=True)
     ctx = build_context(state, settings, llm_factory(run_dir), sim.client(), sim.clock, run_dir, memory=memory)
@@ -113,7 +115,7 @@ def resume_run(run_dir: Path, settings: Settings, llm_factory: Callable[[Path], 
     from simweb import VirtualClock, build
 
     state, frontier = load_checkpoint(run_dir)
-    sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at))
+    sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at), seed=state.world_seed)
     ctx = build_context(state, settings, llm_factory(run_dir), sim.client(), sim.clock, run_dir, frontier,
                         memory=memory)
     notes = approvals.resume(ctx, now)

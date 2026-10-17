@@ -48,5 +48,9 @@ class SimWeb:
         return httpx.Client(transport=self.transport(), timeout=10.0, **kwargs)
 
 
-def build(scenario_id: str, clock: Clock | None = None) -> SimWeb:
-    return SimWeb(load_scenario(scenario_id), clock)
+def build(scenario_id: str, clock: Clock | None = None, seed: int | None = None) -> SimWeb:
+    """seed 覆寫情境的世界種子：同樣的因果結構（事件、效應、干擾項），不同的網址、頁面與雜訊。"""
+    spec = load_scenario(scenario_id)
+    if seed is not None:
+        spec = spec.model_copy(update={"seed": seed})
+    return SimWeb(spec, clock)

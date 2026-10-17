@@ -22,10 +22,10 @@
 |---|---|---|---|---|
 | 至少一個學習機制 | [05 §1–3](05-memory-and-evals.md)：M1、M2 | `memory/` | `tests/test_memory.py`（15 個） | ✅ |
 | 調用過往成功 / 失敗 / 人工糾偏經驗 | M1 三種來源 | `memory/reflect.py`、`memory/correct.py`、`cli.py` | trace 的 `lessons_applied`、主控台「套用經驗」、timeline「記憶與學習」、`memory show` 稽核軌跡 | ✅ |
-| 決策優於過去 | `biases`、M2 先驗 | `core/frontier.py`、`core/actions.py`、`core/steps.py` | s1 連跑抓取 69 → 49 → 38；未參與訓練的 s5 68 → 38（[03 Phase 4](03-implementation-plan.md)）；消融開關 `--ablate` | 🔄 FakeLLM 已驗證；正式評測於 Phase 6 |
-| Evals：可執行的測試方法 | [05 §4](05-memory-and-evals.md) | `evals/` | `seo-intel eval run / train / compare` | ⬜ |
-| Evals：量化指標 | F1、首個關鍵證據抓取數、浪費率、成本、幻覺率、安全違規、糾偏遵循率 | `evals/scorer.py` | `evals/reports/` | ⬜ |
-| 證明比第 1 天更好 | Day 1 vs Day N（保留測試集）＋ 消融 | `evals/runner.py` | `docs/07-research-findings.md` | ⬜ |
+| 決策優於過去 | `biases`、M2 先驗 | `core/frontier.py`、`core/actions.py`、`core/steps.py` | 測試集抓取 −25%（18 組配對，CI −13.6 ～ −5.3）、步驟 −33%、核准請求 −40%；消融：效益來自 M1（[07 §3](07-research-findings.md)） | ✅（效率；正確率已達天花板） |
+| Evals：可執行的測試方法 | [05 §4](05-memory-and-evals.md)、[07 §3.1](07-research-findings.md) | `evals/runner.py`、`cli.py` | `seo-intel eval protocol`；`tests/test_evals.py` | ✅ |
+| Evals：量化指標 | F1、首個關鍵證據抓取數、浪費率、成本、幻覺、安全違規、核准請求數 | `evals/scorer.py`、`evals/report.py` | `evals/reports/<時間>/report.md`；評分只依標準答案與伺服器紀錄 | ✅ |
+| 證明比第 1 天更好 | Day 1 vs Day N（保留測試集、holdout 種子）＋ 消融 ＋ 緊縮預算 | `evals/runner.py` | [`docs/07-research-findings.md`](07-research-findings.md)：+8000 種子組 −29%（CI −18.0 ～ −6.0） | ✅（FakeLLM；真實 LLM 評測列為未來工作） |
 
 ## C. Production-Ready Thinking & Autonomy Boundary
 
@@ -56,11 +56,11 @@ seo-intel research --scenario s1
 ```
 
 ```bash
-seo-intel eval compare day1 dayN --ablate M1,M2
+seo-intel eval protocol --llm fake --test-offset 8000
 ```
 
 1. 逐步模式跑 S1，觀察 8 個步驟、URL 優先序決策、假設與證據（A）。
 2. 開啟 `timeline.html` 檢視完整決策過程（A）。
 3. 給一次人工糾偏後重跑，比較兩次的經驗套用、抓取數與成本（B）。
-4. 檢視 Day 1 vs Day N 評測與消融（B）。
+4. 執行評測協定，檢視 `report.md` 的 Day 1 vs Day N、消融與緊縮預算（B）；結論見 `docs/07`。
 5. 以緊縮預算（`--max-fetches 30 --step`）觸發一次超預算 → 當場核准或拒絕 → 續跑，並在 timeline 的「自治邊界」區段檢查核准紀錄與限制（C）。

@@ -50,6 +50,7 @@ FREE = ("control_vs_topic", "serp_template_share", "template_burst", "timing_ali
 COSTLY = ("competitor_rank_gain", "template_change_sample")
 SAMPLE_FETCHES = 6
 STRATEGIC_RATE = 0.3      # 「策略性改版」至少應涉及範本中約 30% 的主題頁
+TIMING_COVERAGE = 0.5        # 時序反證需要看過期間內至少一半的變動頁
 
 
 @dataclass
@@ -278,7 +279,15 @@ def _timing(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
     if -3 <= lag <= 45:
         return [Draft(h.id, "for", "moderate", ids, note + "：變動先於排名變化")]
     if lag < -7:
-        return [Draft(h.id, "against", "strong", ids, note + "：連最早的變動都晚於排名變化，不可能是原因")]
+        # 觀察到的最早日期只是上限：只有看過該範本大部分期間內的變動頁，才足以強烈否證（Phase 6 評測發現：
+        # 抓得少時最早日期偏晚，會把真正的原因誤判為「晚於排名變化」）
+        stat = ctx.frontier.templates.get(h.template or "") if ctx.frontier else None
+        n_recent = stat.n_recent if stat else 0
+        coverage = len(dates) / n_recent if n_recent else 0.0
+        strength = "strong" if coverage >= TIMING_COVERAGE else "weak"
+        return [Draft(h.id, "against", strength, ids,
+                      note + f"：觀察到的最早變動晚於排名變化（已看過期間內更新的 {len(dates)} / {n_recent} 頁"
+                      + ("，不可能是原因）" if strength == "strong" else "，樣本不足以排除更早的變動）"))]
     if lag > 60:
         return [Draft(h.id, "against", "weak", ids, note + "：變動遠早於排名變化")]
     return []

@@ -29,6 +29,7 @@ trace_app = typer.Typer(help="檢視研究過程", no_args_is_help=True)
 memory_app = typer.Typer(help="記憶（M1 經驗庫、M2 URL 價值）", no_args_is_help=True)
 feedback_app = typer.Typer(help="人工糾偏", no_args_is_help=True)
 approvals_app = typer.Typer(help="人工核准（需核准的動作會讓 episode 存檔暫停）", no_args_is_help=True)
+eval_app = typer.Typer(help="評測：Day 1 vs Day N、消融、緊縮預算", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(config_app, name="config")
 app.add_typer(llm_app, name="llm")
@@ -38,6 +39,7 @@ app.add_typer(trace_app, name="trace")
 app.add_typer(memory_app, name="memory")
 app.add_typer(feedback_app, name="feedback")
 app.add_typer(approvals_app, name="approvals")
+app.add_typer(eval_app, name="eval")
 
 console = Console()
 DbPath = Annotated[Path, typer.Option("--path", help="SQLite 檔案路徑")]
@@ -425,6 +427,7 @@ def research(
     ablate: AblateOpt = "",
     max_fetches: MaxFetchesOpt = None,
     max_llm_usd: MaxLlmOpt = None,
+    seed: Annotated[int | None, typer.Option("--seed", help="SimWeb 世界種子（同樣的因果結構、不同的網址與雜訊）")] = None,
 ) -> None:
     """在 SimWeb 情境中執行一個研究 episode。"""
     if typer_ctx.invoked_subcommand:
@@ -436,8 +439,9 @@ def research(
     from seo_intel.core.runner import apply_run_config, scenario_task
     from simweb import build
 
-    sim = build(scenario)
+    sim = build(scenario, seed=seed)
     state = new_state(scenario_task(sim), sim.clock)
+    state.world_seed = seed
     run_dir = RUNS_DIR / state.id
     run_dir.mkdir(parents=True, exist_ok=True)
     cfg = _new_run_config(run_dir, None if no_memory else (memory or _default_memory()), ablate,
@@ -473,7 +477,7 @@ def research_resume(
         console.print(f"Episode 已結束（{state.status}），無需續跑")
         raise typer.Exit(0)
     settings, mem = apply_run_config(get_settings(), load_run_config(run_dir))
-    sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at))
+    sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at), seed=state.world_seed)
     ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, None), sim.client(), sim.clock, run_dir,
                          frontier, memory=mem)
     try:
@@ -641,6 +645,69 @@ def memory_retire(
     store.event(x.id, None, "retired", x.retired_reason)
     store.close()
     console.print(f"已淘汰 {lesson_id}：{reason}")
+
+
+# ---------- 評測 ----------
+
+EST_LIVE_USD_PER_EPISODE = 0.35   # Phase 3 實測：真實 Opus 每個 episode 約 US$0.31–0.32
+
+
+@eval_app.command("protocol")
+def eval_protocol(
+    llm: Annotated[str, typer.Option("--llm", help="fake（免費、確定性）或 live（真實 API，需 --max-usd）")] = "fake",
+    seeds: Annotated[int, typer.Option(help="每個測試情境的種子數")] = 3,
+    test_offset: Annotated[int, typer.Option(help="測試集種子位移（用從沒看過的世界做獨立驗證）")] = 0,
+    out: Annotated[Path | None, typer.Option(help="輸出目錄（預設 evals/reports/<時間>-<llm>）")] = None,
+    max_usd: Annotated[float | None, typer.Option("--max-usd", help="真實 LLM 的花費上限；超過即中止")] = None,
+    quick: Annotated[bool, typer.Option("--quick", help="只跑 Day 1 / 訓練 / Day N（不跑消融與緊縮預算）")] = False,
+) -> None:
+    """完整評測：Day 1 → 訓練（含腳本化的人工糾偏）→ Day N → 消融 → 緊縮預算，產出 report.md。"""
+    from datetime import datetime
+
+    from seo_intel.evals.report import render
+    from seo_intel.evals.runner import BudgetExceeded, EvalConfig, protocol, save, splits
+
+    settings = get_settings()
+    sp = splits()
+    n_test, n_train = len(sp["test"]) * seeds, len(sp["train"]) * seeds
+    n_eps = n_test + n_train + (0 if quick else n_test * 2 + n_test * 4)
+    if llm == "live":
+        est = n_eps * EST_LIVE_USD_PER_EPISODE
+        console.print(f"預估 {n_eps} 個 episode、約 US${est:.0f}（每個 episode 約 US${EST_LIVE_USD_PER_EPISODE}）")
+        if max_usd is None:
+            console.print("[red]真實 LLM 評測必須指定 --max-usd（花費上限，超過即中止）[/]")
+            raise typer.Exit(1)
+    elif llm != "fake":
+        raise typer.BadParameter("--llm 只接受 fake 或 live")
+    out = out or PROJECT_ROOT / "evals" / "reports" / f"{datetime.now():%Y%m%d-%H%M%S}-{llm}"
+    cfg = EvalConfig(out_dir=out, seeds=seeds, test_offset=test_offset, max_usd=max_usd,
+                     ablations=() if quick else ("M1", "M2"), tight_budgets=() if quick else (20, 30),
+                     progress=lambda m: console.print(escape(m), highlight=False))
+    reflector = _make_llm("fake", settings, out, None) if llm == "fake" else None
+    if llm == "live":
+        from seo_intel.llm import AnthropicLLM, RecordingLLM
+
+        reflector = RecordingLLM(AnthropicLLM(settings.models), out / "reflector_cassette.jsonl")
+    meta = {"name": out.name, "llm": llm, "seeds": seeds, "test_offset": test_offset, "on_approval": cfg.on_approval,
+            "test": [x for x, _ in sp["test"]], "train": [x for x, _ in sp["train"]]}
+    try:
+        ev = protocol(settings, lambda run_dir: _make_llm(llm, settings, run_dir, None), cfg, reflector)
+    except BudgetExceeded as e:
+        console.print(f"[red]{escape(str(e))}[/]")
+        raise typer.Exit(1) from None
+    path = save(ev, cfg, meta)
+    (out / "report.md").write_text(render(json.loads(path.read_text(encoding="utf-8")), out), encoding="utf-8")
+    console.print(f"\n報告：{out / 'report.md'}\n原始結果：{path}\n每個 episode 的時間軸：{out / 'runs'}")
+
+
+@eval_app.command("report")
+def eval_report(out: Annotated[Path, typer.Argument(help="評測輸出目錄")]) -> None:
+    """依 results.json 重新產生 report.md。"""
+    from seo_intel.evals.report import render
+
+    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    (out / "report.md").write_text(render(results, out), encoding="utf-8")
+    console.print(f"已產生：{out / 'report.md'}")
 
 
 # ---------- 人工核准 ----------

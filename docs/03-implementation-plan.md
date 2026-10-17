@@ -207,13 +207,16 @@ flowchart LR
 
 | # | 任務 | 產出 |
 |---|---|---|
-| 6.1 | 確定性評分器 | `evals/scorer.py` |
-| 6.2 | Runner：`eval run / train / compare`、消融 | `evals/runner.py` |
-| 6.3 | 免費確定性測試（05 §4.5） | `tests/` |
-| 6.4 | 完整 Day 1 vs Day N 評測（約 US$40，需事先同意） | `evals/reports/` |
-| 6.5 | **研究成果文件**：研究問題的回答、評測數據、觀察到的 Agent 行為、限制、未來工作 | `docs/07-research-findings.md` |
+| 6.1 | 確定性評分器（標準答案 + 伺服器紀錄，不採信 Agent 自報） | `evals/scorer.py` |
+| 6.2 | 評測協定：Day 1 → 訓練（腳本化的人工糾偏）→ Day N（凍結快照，測試集不寫回記憶）→ 消融 → 緊縮預算；世界種子；真實 LLM 花費上限 | `evals/runner.py`、`simweb/sim.py` |
+| 6.3 | 報告：各條件彙總、配對差異與 bootstrap 信賴區間、訓練過程、學到的記憶 | `evals/report.py` |
+| 6.4 | CLI：`eval protocol`（`--llm fake|live`、`--test-offset`、`--quick`、`--max-usd`）、`eval report`；`research --seed` | `cli.py` |
+| 6.5 | 依評測發現修正：經驗「訊號已足夠就直接進入假設檢驗」、時序反證需要足夠覆蓋率 | `core/steps.py`、`core/probes.py` |
+| 6.6 | **研究成果文件** | [`docs/07-research-findings.md`](07-research-findings.md) |
 
 **完成定義**：`07-research-findings.md` 以數據回答 RQ1–RQ3，並誠實列出未達標項目與原因。
+
+**實作結果（已完成，FakeLLM）**：測試集 18 / 18 正確；學習後抓取 −25%（18 組配對，95% CI −13.6 ～ −5.3），在兩個修正完成後才首次使用的種子上 −29%；步驟 −33%；緊縮預算下人工核准請求約 −40%；首個關鍵證據沒有變化；M2 沒有可測得的貢獻；所有評測 episode 安全違規 0。全專案 172 個測試通過。完整數據、發現、方法論（測試集洩漏的處理）與限制見 [07](07-research-findings.md)。研究決定以 FakeLLM 評測收尾；真實 LLM 評測（完整約 US$19、`--quick` 約 US$6）列為未來工作。
 
 ---
 
@@ -222,4 +225,4 @@ flowchart LR
 | 項目 | 何時 | 說明 |
 |---|---|---|
 | Anthropic API key | Phase 0.4 | 環境變數 `ANTHROPIC_API_KEY` |
-| 評測預算同意 | Phase 6.4 | 約 US$40（實測後更新） |
+| 評測預算同意 | Phase 6（真實 LLM 評測） | 完整協定約 54 個 episode、US$19；`--quick` 約 18 個、US$6（依 Phase 3 實測每個 episode 約 US$0.32） |

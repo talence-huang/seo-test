@@ -127,8 +127,8 @@ def _chaos_build(p: float, seed: int):
     original = simweb.build
     rng = random.Random(seed)
 
-    def build(sid, clock=None):
-        sim = original(sid, clock=clock)
+    def build(sid, clock=None, seed=None):
+        sim = original(sid, clock=clock, seed=seed)
         make = sim.client
 
         def client():

@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from urllib.parse import urlsplit
 
 from seo_intel.core import approvals, beliefs, probes
-from seo_intel.core.actions import COMPONENT_LABELS, compute_phase, generate
+from seo_intel.core.actions import COMPONENT_LABELS, compute_phase, focus_satisfied, generate
 from seo_intel.core.claims import confounder_note, derive_claims, render_markdown, validate_citations
 from seo_intel.core.context import EpisodeContext, StepOutcome, llm_record
 from seo_intel.core.digest import hypotheses_digest, observation_digest
@@ -940,6 +940,14 @@ def decide_next(ctx: EpisodeContext) -> StepOutcome:
                 and sum(st.fetch_yield[-DIMINISHING_WINDOW:]) == 0:
             for n in st.needs_of("page_changes"):
                 _resolve(n, f"最近 {DIMINISHING_WINDOW} 次抓取沒有新證據（報酬遞減）", out, "exhausted")
+        if st.phase in (Phase.SAMPLING, Phase.TARGETED) and (lid := focus_satisfied(ctx)):
+            # 經驗「答案範本在探勘時就有訊號」的本意是直接去檢驗，而不是換個方式繼續蒐集（Phase 6 評測發現）
+            for n in [n for n in st.needs_of("page_changes") if n.status == "open"]:
+                _resolve(n, f"依經驗 {lid}：訊號範本已有證據候選，改由假設檢驗蒐集有鑑別力的證據", out)
+                lesson = next((x for x in ctx.memory.lessons if x.id == lid), None)
+                if lesson:
+                    ctx.memory.mark(st, lesson, "early_hypotheses")
+                    out.lessons_applied.append(lid)
         if no_candidates:
             why = ("定向抓取額度已用完（剩餘額度保留給驗證）" if st.phase == Phase.VERIFICATION
                    else f"階段 {st.phase.value} 沒有可執行的行動")

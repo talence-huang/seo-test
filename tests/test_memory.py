@@ -90,7 +90,7 @@ def test_learning_curve_on_repeated_scenario(settings, tmp_path):
     fetches = [r.state.budget.fetches for r in runs]
     assert fetches[0] > fetches[1] > fetches[2], fetches
     assert not runs[0].state.lessons_applied and not runs[1].state.lessons_applied   # 第 2 次只有 M2 先驗
-    assert "skip_broad_sampling" in runs[2].state.lessons_applied["L-1"]
+    assert "early_hypotheses" in runs[2].state.lessons_applied["L-1"]                  # 訊號已足夠：直接進入假設檢驗
     store = MemoryStore(mem)
     assert store.lesson("L-1").status == "active" and store.lesson("L-1").support == 3
     assert store.lesson("L-2").status == "active"                                      # 跳過付費探針

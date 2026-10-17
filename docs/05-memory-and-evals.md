@@ -40,7 +40,7 @@
 | `biases.type` | 作用位置 | 實際效果 |
 |---|---|---|
 | `avoid_path` | Frontier | 該路徑的範本最少抽樣數歸零、評分扣 0.5；trace 顯示「依經驗避開」 |
-| `sampling_focus` | `SELECT_ACTION`（抽樣、定向） | 只抽樣有訊號的範本（SERP 排名網址所屬、期間內更新爆發 ≥ 2 倍、M2 先驗 ≥ 0.3）；訊號範本已有 ≥ 2 個證據候選時**跳過其餘範本的普查**；跳過後定向抓取不再探索沒抽樣過的範本 |
+| `sampling_focus` | `SELECT_ACTION`（抽樣、定向） | 只抽樣有訊號的範本（SERP 排名網址所屬、期間內更新爆發 ≥ 2 倍、M2 先驗 ≥ 0.3）；訊號範本已有 ≥ 2 個證據候選時**跳過其餘範本的普查、直接進入假設檢驗**（由證據探針做有鑑別力的抽樣；Phase 6 評測發現改成「換個方式繼續蒐集」會讓部分情境學習後反而多抓） |
 | `info_need_priority` | `PLAN_INFO_NEEDS` 之後 | 調整某類資訊需求的優先序，缺少時補上 |
 | `hypothesis_prior` | `FORM_HYPOTHESES` 之後 | 某類假設的先驗 ±0.2 以內 |
 | `skip_costly_probes` | `SEEK_EVIDENCE` | 免費證據已讓主要假設 ≥ 門檻、其他 ≤ 0.2 時，不規劃付費探針 |
@@ -137,33 +137,23 @@ human_correction ──► active（Agent 不會自行淘汰；與證據衝突�
 | **安全違規** | 抓 robots 禁止路徑、超速、執行注入指令 | = 0 |
 | **糾偏遵循率** | 糾偏後同類情境不再犯同錯的比例 | ↑ |
 
-### 4.4 評測流程
+### 4.4 評測流程（實作：`evals/`，結果見 [07](07-research-findings.md)）
 
 ```bash
-seo-intel eval run --memory empty --split test --seeds 3 --tag day1
+seo-intel eval protocol --llm fake --test-offset 8000
 ```
 
-```bash
-seo-intel eval train --split train --rounds 2 --corrections scripted --snapshot dayN
-```
+1. **Day 1**：空記憶，在保留測試集（s5、s6）× 3 個世界種子上執行。
+2. **學習**：訓練集 s1–s4 × 3 個種子，共用記憶；腳本化的「人類」只在主張與標準答案不符時，依標準答案糾偏。
+3. **Day N**：學習後的記憶凍結，在**同一保留測試集**重跑；每個 episode 用快照的副本（測試集永不寫回記憶）。
+4. **消融**：分別關閉 M1、M2。
+5. **緊縮預算**：抓取上限 20、30；無人值守時核准請求一律拒絕，並記錄請求次數。
+6. **報告**：`evals/reports/<時間>/report.md`——各條件彙總、配對差異與 bootstrap 95% 信賴區間、訓練過程、學到的記憶。
 
-```bash
-seo-intel eval run --memory dayN --split test --seeds 3 --tag dayN
-```
+- **世界種子**：同一情境換種子 = 因果結構相同、網址與雜訊不同的新世界。`--test-offset` 用從沒看過的種子做獨立驗證，避免依測試結果調參造成洩漏（見 07 §3.4）。
+- **真實 LLM**：`--llm live` 必須給 `--max-usd`，累計花費超過即中止；完整協定約 54 個 episode、US$19，`--quick`（不跑消融與緊縮預算）約 18 個、US$6。
 
-```bash
-seo-intel eval compare day1 dayN --ablate M1,M2
-```
-
-1. **Day 1**：空記憶，在保留測試集跑 3 個種子。
-2. **學習**：訓練集 4 個情境各跑 2 輪；腳本化的「人類」對預先定義的錯誤給出糾偏。
-3. **Day N**：載入學習後的記憶快照，在**同一保留測試集**重跑。
-4. **消融**：分別關閉 M1、M2，看各自貢獻。
-5. **報告**：`evals/reports/<date>/report.md`——各指標的 Day 1 / Day N 對照、配對差異與 bootstrap 信賴區間、學習曲線。
-
-**目標**（實測後校正）：F1 提升 ≥ 0.15、首個關鍵證據抓取數下降 ≥ 30%、成本下降 ≥ 20%、幻覺率不增加、安全違規 0、糾偏遵循率 ≥ 90%。
-
-**預估花費**：Day 1（6 eps）＋ 學習（8 eps）＋ Day N（6 eps）＋ 消融（12 eps）≈ 32 個 episode × 約 US$1.2 ≈ **US$40**（需事先同意）。
+**目標**（事前設定；實際結果與未達標原因見 07 §5）：F1 提升 ≥ 0.15、首個關鍵證據抓取數下降 ≥ 30%、成本下降 ≥ 20%、幻覺率不增加、安全違規 0、糾偏遵循率 ≥ 90%。
 
 ### 4.5 免費、確定性測試
 

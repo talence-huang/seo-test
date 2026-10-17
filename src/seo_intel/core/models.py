@@ -250,6 +250,7 @@ class EpisodeState(BaseModel):
     serp_gainers: list[str] = []
     budget: BudgetState = BudgetState()
     clock_at: float = 0.0
+    world_seed: int | None = None                  # SimWeb 世界種子覆寫（None＝情境預設），續跑時重建同一個世界
     approvals: list[Approval] = []                 # 所有核准請求（含已決定的，供稽核）
     grants: list[dict[str, str]] = []              # 已核准、尚未使用的一次性授權 {approval, rule, signature}
     denials: list[dict[str, str]] = []             # 人工拒絕的範圍 {approval, rule, scope}：之後直接拒絕、不再詢問

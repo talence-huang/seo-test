@@ -14,7 +14,7 @@
 | 3 | 假設、證據與報告（可證偽假設、6 種證據探針、log-odds 信心、紅隊驗證、結構化主張、引用驗證） | 完成 |
 | 4 | 學習機制（M1 經驗庫、M2 URL 價值、REFLECT、人工糾偏、經驗治理） | 完成（FakeLLM 驗證：s1 連跑抓取 69 → 49 → 38） |
 | 5 | 自治邊界與失效處置（完整 PolicyGate、人工核准流程、注入防護、混沌測試） | 完成（被攻陷的 LLM 也無法讓 Agent 越界或改變結論） |
-| 6 | 評測與研究成果收斂 | 未開始 |
+| 6 | 評測與研究成果收斂（確定性評分、Day 1 / Day N 協定、消融、緊縮預算、[研究成果](docs/07-research-findings.md)） | 完成（FakeLLM：學習後抓取 −25%；真實 LLM 評測列為未來工作） |
 
 ## 安裝
 
@@ -43,6 +43,8 @@ seo-intel research -s s1 --max-fetches 30 --step   # 緊縮預算：預算用盡
 seo-intel approvals list                 # 待核准的請求（--all 含已決定的）
 seo-intel approvals approve <A-id|episode> --note "..."   # 核准（一次性、24 小時內有效）
 seo-intel approvals reject <A-id|episode> --note "..."    # 拒絕：改走降級路徑並寫入報告限制
+seo-intel eval protocol --llm fake         # 評測：Day 1 → 訓練 → Day N → 消融 → 緊縮預算（--test-offset 換新種子）
+seo-intel eval protocol --llm live --quick --max-usd 8   # 真實 LLM 評測（必須給花費上限）
 seo-intel memory list                    # 經驗庫：狀態、來源、支持數、套用成效（--all 含已淘汰）
 seo-intel memory show L-1                # 一條經驗的內容與稽核軌跡
 seo-intel memory stats                   # M2 範本價值與 episode 成效
@@ -73,6 +75,7 @@ pytest -m live      # 真實 API 測試（少量費用）
 | [04 研究迴圈與可觀察性](docs/04-research-loop.md) | 需求 A |
 | [05 學習機制與 Evals](docs/05-memory-and-evals.md) | 需求 B |
 | [06 失效模式與自治邊界](docs/06-reliability-and-autonomy.md) | 需求 C |
+| [07 研究成果](docs/07-research-findings.md) | RQ1–RQ3 的數據、發現、限制與未來工作 |
 
 ## 專案結構
 
@@ -85,10 +88,12 @@ src/seo_intel/
   core/            研究迴圈：狀態機、步驟、行動候選、Frontier、預算、PolicyGate、檢查點
   tools/           HTTP 包裝層、萃取、差異、排名、歷史快照、網站探勘
   observe/         即時主控台、trace、資料庫紀錄、timeline.html
+  evals/           評測：確定性評分器、Day 1 / Day N 協定、報告
   memory/          記憶：經驗庫（M1）、URL 價值先驗（M2）、REFLECT 規則、人工糾偏、治理（data/memory.db）
   cli.py           seo-intel 指令
 src/simweb/        研究環境（獨立套件）：世界產生器、反爬行為、模擬排名與歷史 API
 evals/scenarios/   6 個研究情境（4 訓練 / 2 測試）
+evals/reports/     評測輸出（不納入版控）
 tests/             單元測試
 docs/              設計文件
 ```

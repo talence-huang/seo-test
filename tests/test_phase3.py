@@ -107,7 +107,13 @@ def test_timing_uses_earliest_change_so_gradual_rollouts_are_not_penalised(setti
     assert drafts[0].direction == "for"
     for url in st.template_changes[tkey]:
         st.fetched[url]["published"] = "2026-08-20"     # 連最早的變動都晚於起始日
-    assert probes._timing(ctx, _hyp(template=tkey, site="flowboard.sim"))[0].strength == "strong"
+    from seo_intel.core.frontier import Frontier, TemplateStat
+    ctx.frontier = Frontier(["gantt charts"], (date(2026, 6, 1), date(2026, 10, 1)), ["flowboard.sim"])
+    ctx.frontier.templates[tkey] = TemplateStat(key=tkey, domain="flowboard.sim", n_recent=40)
+    weak = probes._timing(ctx, _hyp(template=tkey, site="flowboard.sim"))[0]
+    assert (weak.direction, weak.strength) == ("against", "weak")      # 只看過 5 / 40 頁：最早日期只是上限
+    ctx.frontier.templates[tkey].n_recent = 8
+    assert probes._timing(ctx, _hyp(template=tkey, site="flowboard.sim"))[0].strength == "strong"   # 看過 5 / 8 頁
 
 
 # ---------- 紅隊與引用驗證 ----------
