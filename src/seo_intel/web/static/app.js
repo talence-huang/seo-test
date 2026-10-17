@@ -239,7 +239,7 @@ function renderResult(el, s, live) {
     <button data-resume="${esc(s.id)}" data-step="0">繼續執行</button> <button data-resume="${esc(s.id)}" data-step="1">逐步繼續</button></div>`);
   else if (s.status === "failed") parts.push(`<div class="callout bad"><b>執行失敗</b>：${esc(s.end_reason)}</div>`);
   if (s.report && s.report.headline) {
-    const ok = s.claims.length > 0;
+    const ok = s.claims.some((c) => c.validated);
     parts.push(`<div class="callout ${ok ? "ok" : "warn"}"><div class="headline">${esc(s.report.headline)}</div>`
       + `<div class="muted">結束原因：${esc(s.end_reason)} · 抓取 ${s.budget.fetches} 次 · LLM ${money(s.budget.llm_usd)} · ${s.seq} 步</div></div>`);
   }
@@ -247,15 +247,11 @@ function renderResult(el, s, live) {
     parts.push(`<div class="links">${s.has_timeline ? `<a href="/files/runs/${esc(s.id)}/timeline.html" target="_blank">開啟完整時間軸 ↗</a>` : ""}`
       + `${s.has_report ? `<a href="/files/runs/${esc(s.id)}/report.md" target="_blank">報告（Markdown）↗</a>` : ""}</div>`);
   }
-  if (s.claims.length) {
-    parts.push(`<h3>結論（程式由證據推導的主張）</h3><table><tr><th>主張</th><th>網站</th><th>範本</th><th>變動類型</th><th>信心</th><th>驗證</th></tr>`
-      + s.claims.map((c) => `<tr><td>${esc(c.id)}</td><td>${esc(c.subject_site)}</td><td><code>${esc(c.template_prefix)}</code></td>`
-        + `<td>${esc(c.change_types.join("、"))}</td><td>${Number(c.confidence).toFixed(2)}</td><td>${c.validated ? "✓" : "✗"}</td></tr>`).join("") + "</table>");
-  }
-  if (s.report && s.report.summary) parts.push(`<p>${esc(s.report.summary)}</p>`);
+  if (s.report && s.report.headline) parts.push(conclusions(s));   // 報告寫完才有標題（由程式產生）
   if (s.hypotheses.length) {
-    parts.push(`<h3>假設</h3><table><tr><th>ID</th><th>狀態</th><th>信心</th><th>內容</th></tr>`
-      + s.hypotheses.map((h) => `<tr><td>${esc(h.id)}</td><td>${esc(HYP_ZH[h.status] || h.status)}</td><td>${h.posterior.toFixed(2)}</td><td>${esc(h.statement)}</td></tr>`).join("") + "</table>");
+    parts.push(`<h3>假設</h3><table><tr><th>ID</th><th>狀態</th><th>信心</th><th>做法</th><th>內容</th></tr>`
+      + s.hypotheses.map((h) => `<tr><td>${esc(h.id)}</td><td>${esc(HYP_ZH[h.status] || h.status)}</td><td>${h.posterior.toFixed(2)}</td>`
+        + `<td>${esc(h.practice || "—")}</td><td>${esc(h.statement)}</td></tr>`).join("") + "</table>");
   }
   const caveats = (s.report && s.report.caveats) || [];
   if (caveats.length) parts.push(`<h3>限制與注意事項</h3><ul>${caveats.map((c) => `<li>${esc(c)}</li>`).join("")}</ul>`);
@@ -269,6 +265,40 @@ function renderResult(el, s, live) {
   parts.push("</div>");
   el.innerHTML = parts.join("");
   bindResult(el, s, live);
+}
+
+// 研究的三個問題：On-page 策略、Off-page 策略、優先行動；沒有結論時列出原因與資料缺口
+function conclusions(s) {
+  const out = [];
+  const conf = (c) => `${Number(c.confidence).toFixed(2)}${c.validated ? "" : "（未通過驗證）"}`;
+  const on = s.claims.filter((c) => c.display.side === "onpage");
+  const off = s.claims.filter((c) => c.display.side === "offpage");
+  if (s.report.summary) out.push(`<p>${esc(s.report.summary)}</p>`);
+  out.push("<h3>1. On-page 策略</h3>" + (on.length
+    ? `<div class="table-wrap"><table><tr><th>結論</th><th>競品</th><th>做法</th><th>排名頁</th><th>同網站其他主題頁</th><th>期間內才採用</th><th>信心</th></tr>`
+      + on.map((c) => `<tr><td>${esc(c.id)}</td><td>${esc(c.subject_site)}</td><td>${esc(c.display.practice)}</td>`
+        + `<td>${esc(c.display.competitor)}</td><td>${esc(c.display.others)}</td><td>${esc(c.display.adopted)}</td><td>${conf(c)}</td></tr>`).join("") + "</table></div>"
+    : `<p class="muted">沒有成立的 On-page 策略結論。</p>`));
+  out.push("<h3>2. Off-page 策略</h3>" + (off.length
+    ? `<div class="table-wrap"><table><tr><th>結論</th><th>競品</th><th>做法</th><th>量測</th><th>期間內新增引用網域</th><th>信心</th></tr>`
+      + off.map((c) => `<tr><td>${esc(c.id)}</td><td>${esc(c.subject_site)}</td><td>${esc(c.display.practice)}</td><td>${esc(c.display.competitor)}</td>`
+        + `<td>${c.display.new_ref_domains ?? "—"}（平常約 ${c.display.baseline ?? "—"}）</td><td>${conf(c)}</td></tr>`).join("") + "</table></div>"
+    : `<p class="muted">${s.task.backlink_source === "none" ? "沒有提供反向連結 CSV，無法研究 Off-page 策略。" : "沒有成立的 Off-page 策略結論。"}</p>`));
+  out.push("<h3>3. 優先行動</h3>" + (s.actions.length
+    ? `<p class="hint">分數 = 影響（結論信心 × 競品排名頁的普及率）× 自家差距 ÷ 實作難度，由程式計算。</p>`
+      + `<div class="table-wrap"><table><tr><th>順序</th><th>行動</th><th>做法</th><th>競品</th><th>自家</th><th>差距</th><th>難度</th><th>分數</th><th>狀態</th><th>依據</th></tr>`
+      + s.actions.map((a) => `<tr><td>${esc(a.id)}</td><td>${esc(a.action)}</td><td>${esc(a.label)}</td><td>${esc(a.display.competitor)}</td>`
+        + `<td>${esc(a.display.own)}</td><td>${esc(a.display.gap)}</td><td>${esc(a.display.effort)}</td><td>${a.score.toFixed(2)}</td>`
+        + `<td>${esc(a.display.status)}</td><td>${esc(a.claim_id)}</td></tr>`).join("") + "</table></div>"
+      + (s.task.own_site ? "" : `<p class="hint">沒有提供自家網址：差距以 50% 估計，排序只反映競品的做法。</p>`)
+    : `<p class="muted">沒有成立的策略結論，無法排出優先行動。</p>`));
+  const recs = s.report.recommendations || [];
+  if (recs.length) out.push(`<h3>建議</h3><ul>${recs.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`);
+  const reasons = s.report.inconclusive_reasons || [];
+  if (reasons.length) out.push(`<div class="callout warn"><b>為什麼沒有結論</b><ul>${reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul></div>`);
+  const gaps = s.report.data_gaps || [];
+  if (gaps.length) out.push(`<div class="callout"><b>資料缺口</b>（補上這些資料，對應的問題才答得了）<ul>${gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>`);
+  return out.join("");
 }
 
 function approvalCard(s) {
@@ -360,9 +390,10 @@ async function loadMemory() {
       + `${x.retired_reason ? `<div class="muted">淘汰原因：${esc(x.retired_reason)}</div>` : ""}</td><td>${esc(x.biases_text.join("；") || "僅文字")}</td>`
       + `<td>${x.status !== "retired" ? `<button class="danger" data-retire="${esc(x.id)}">淘汰</button>` : ""}</td></tr>`).join("") + "</table>"
     : `<p class="muted">還沒有經驗。多做幾次研究，Agent 會從成功與失敗中萃取經驗（需要 2 次支持才生效），你的糾正會立即生效。</p>`;
-  const outcomes = m.outcomes.length ? `<table><tr><th>Episode</th><th>網站｜關鍵字</th><th>成功</th><th>人工糾偏</th><th>抓取</th><th>LLM</th><th>套用經驗</th></tr>`
+  const outcomes = m.outcomes.length ? `<table><tr><th>Episode</th><th>網站｜關鍵字</th><th>成功</th><th>人工糾偏</th><th>抓取</th><th>LLM</th><th>套用經驗</th><th>未成功的原因</th></tr>`
     + m.outcomes.map((o) => `<tr><td>${esc(o.episode_id)}</td><td>${esc(o.scenario)}</td><td>${o.success ? "✓" : "✗"}</td><td>${o.corrected ? "是" : ""}</td>`
-      + `<td>${o.fetches}</td><td>${money(o.llm_usd)}</td><td>${esc(JSON.parse(o.lessons_json || "[]").join("、"))}</td></tr>`).join("") + "</table>" : "";
+      + `<td>${o.fetches}</td><td>${money(o.llm_usd)}</td><td>${esc(JSON.parse(o.lessons_json || "[]").join("、"))}</td>`
+      + `<td>${JSON.parse(o.notes_json || "[]").map((n) => `<div>${esc(n)}</div>`).join("") || "—"}</td></tr>`).join("") + "</table>" : "";
   const stats = m.stats.length ? `<table><tr><th>層級</th><th>鍵</th><th>命中</th><th>未命中</th><th>價值</th></tr>`
     + m.stats.map((r) => `<tr><td>${esc(r.label)}</td><td><code>${esc(r.key)}</code></td><td>${Number(r.alpha).toFixed(1)}</td>`
       + `<td>${Number(r.beta).toFixed(1)}</td><td>${Number(r.mean).toFixed(2)}</td></tr>`).join("") + "</table>" : "";

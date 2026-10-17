@@ -58,6 +58,12 @@ def _state_dict(run_dir: Path) -> dict:
     return state
 
 
+def label(key: str) -> str:
+    from seo_intel.core.strategy import label as dimension_label
+
+    return dimension_label(key)
+
+
 def _label(task: dict) -> str:
     return f"{'、'.join(task['competitors'])}｜{'、'.join(task.get('keywords') or [])}"
 
@@ -109,7 +115,8 @@ class App:
             out.append({"id": st["id"], "label": _label(st["task"]),
                         "status": st["status"], "end_reason": st.get("end_reason"), "seq": st["seq"],
                         "fetches": st["budget"]["fetches"], "llm_usd": round(st["budget"]["llm_usd"], 4),
-                        "claims": [c["template"] for c in st.get("claims") or []],
+                        "claims": [label(c["dimension"]) if c.get("dimension") else c["template"]
+                                   for c in st.get("claims") or [] if c.get("validated", True)],
                         "pending_approval": pa["id"] if pa else None, "job": job.info() if job else None})
         return out
 

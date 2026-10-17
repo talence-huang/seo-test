@@ -283,6 +283,16 @@ def _execute(ectx, *, step: bool, quiet: bool, verbose: bool, db_path: Path, res
     console.print(f"請求：{env['requests_by_host']}（{escape(env['note'])}）", highlight=False)
     if st.report and st.report.get("headline"):
         console.print(f"[bold]結論[/]：{escape(st.report['headline'])}")
+    from seo_intel.core.claims import action_display
+
+    for a in st.actions[:6]:
+        d = action_display(a)
+        console.print(f"  [bold]{a.id}[/] {escape(a.action)}（{escape(a.label)}；競品 {d['competitor']}、自家 {d['own']}、"
+                      f"差距 {d['gap']}、難度 {d['effort']}；{d['status']}）")
+    for x in (st.report or {}).get("inconclusive_reasons") or []:
+        console.print(f"  [yellow]沒有結論的原因[/]：{escape(x)}")
+    for x in (st.report or {}).get("data_gaps") or []:
+        console.print(f"  [yellow]資料缺口[/]：{escape(x)}")
     console.print(f"時間軸：{run_dir / 'timeline.html'}")
     console.print(f"trace：{run_dir / 'trace.jsonl'}")
     if loop.paused or st.status == "running":
@@ -520,10 +530,13 @@ def memory_stats(limit: Annotated[int, typer.Option(help="列出幾筆 M2 統計
         t.add_row(LABEL.get(r["scope"], r["scope"]), r["key"], f"{r['alpha']:g}", f"{r['beta']:g}", f"{r['mean']:.2f}",
                   str(r["episodes"]))
     console.print(t)
-    o = Table("Episode", "網站｜關鍵字", "成功", "人工糾偏", "抓取", "API", "LLM US$", "套用經驗", title="Episode 成效")
+    o = Table("Episode", "網站｜關鍵字", "成功", "人工糾偏", "抓取", "API", "LLM US$", "套用經驗", "未成功的原因",
+              title="Episode 成效")
     for r in store.conn.execute("SELECT * FROM episode_outcomes ORDER BY ts"):
+        notes = json.loads(r["notes_json"] or "[]")
         o.add_row(r["episode_id"], r["scenario"] or "—", "✓" if r["success"] else "✗", "是" if r["corrected"] else "",
-                  str(r["fetches"]), str(r["api_calls"]), f"{r['llm_usd']:.4f}", ", ".join(json.loads(r["lessons_json"])))
+                  str(r["fetches"]), str(r["api_calls"]), f"{r['llm_usd']:.4f}", ", ".join(json.loads(r["lessons_json"])),
+                  "；".join(notes[:2]) or "—")
     console.print(o)
     store.close()
 

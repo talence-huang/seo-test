@@ -197,6 +197,13 @@ def reflect(ctx: EpisodeContext) -> tuple[list[str], dict]:
     store = mem.store
     success = episode_success(ctx)
     lines = [f"結果：{'成功' if success else '未成功'}（{st.end_reason}）"]
+    notes: list[str] = []
+    if not success:   # 沒有結論時也記錄原因：記憶分頁看得到「為什麼沒學到東西」、下次要補什麼資料
+        rep = st.report or {}
+        notes = list(rep.get("inconclusive_reasons") or []) + [f"資料缺口：{g}" for g in rep.get("data_gaps") or []]
+        if not notes and st.claims:
+            notes = ["結論沒有全部通過引用驗證"]
+        lines += [f"未成功的原因：{x}" for x in notes]
     if mem.use_m2 and success and st.goal is not None:
         lines += update_url_values(ctx, store)
     elif mem.use_m2:
@@ -208,7 +215,7 @@ def reflect(ctx: EpisodeContext) -> tuple[list[str], dict]:
     store.record_outcome({"episode_id": st.id, "scenario": st.task.label,
                           "goal_type": st.goal.goal_type if st.goal else None, "success": success,
                           "end_reason": st.end_reason, "fetches": st.budget.fetches, "api_calls": st.budget.api_calls,
-                          "llm_usd": st.budget.llm_usd, "lessons": sorted(st.lessons_applied)})
-    summary = {"success": success, "lessons_applied": st.lessons_applied,
+                          "llm_usd": st.budget.llm_usd, "lessons": sorted(st.lessons_applied), "notes": notes})
+    summary = {"success": success, "notes": notes, "lessons_applied": st.lessons_applied,
                "active_lessons": len(store.lessons("active")), "candidate_lessons": len(store.lessons("candidate"))}
     return lines, summary

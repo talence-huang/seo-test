@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS episode_outcomes (
     llm_usd         REAL NOT NULL,
     lessons_json    TEXT NOT NULL,                   -- 本 episode 套用的經驗
     corrected       INTEGER NOT NULL DEFAULT 0,      -- 是否被人工糾偏為錯誤
-    ts              TEXT NOT NULL
+    ts              TEXT NOT NULL,
+    notes_json      TEXT NOT NULL DEFAULT '[]'       -- 未成功的原因（研究無結論時由程式說明）
 );
 
 CREATE TABLE IF NOT EXISTS lesson_events (           -- 經驗的稽核軌跡（append-only）

@@ -319,3 +319,67 @@ def test_report_explains_why_there_is_no_conclusion(settings, tmp_path, monkeypa
     assert reasons[0].startswith("沒有提出可以檢驗的假設") and any("沒有排名資料" in x for x in reasons)
     md = (r.ctx.run_dir / "report.md").read_text(encoding="utf-8")
     assert "## 為什麼沒有結論" in md and "## 資料缺口" in md and "無法研究 Off-page 策略" in md
+
+
+def test_result_page_and_timeline_show_three_questions(settings, tmp_path, monkeypatch):
+    from seo_intel.web.jobs import episode_summary
+
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    r = run_real({"competitors": [realsite.SITE], "keywords": realsite.KEYWORDS, "serp_source": "serpapi",
+                  "own_site": realsite.OWN, "backlink_paths": [str(_links_csv(tmp_path))]},
+                 settings, lambda d: _Scripted(), run_root=tmp_path / "runs", client=realsite.client([]),
+                 clock=TestClock(), today=TODAY, history=tmp_path / "h.jsonl")
+    s = episode_summary(r.ctx.run_dir)
+    off = [c for c in s["claims"] if c["display"]["side"] == "offpage"]
+    assert off and off[0]["display"]["practice"] in ("新增引用網域（反向連結成長）", "錨點文字含關鍵字")
+    a1 = s["actions"][0]
+    assert a1["id"] == "A1" and a1["display"]["status"] == "建議執行" and a1["display"]["own"] == "0 個新網域"
+    assert s["task"]["backlink_source"] == "csv" and s["report"]["recommendations"]
+    html = (r.ctx.run_dir / "timeline.html").read_text(encoding="utf-8")
+    for text in ("1. On-page 策略", "2. Off-page 策略", "3. 優先行動", "輪廓（程式量測的做法）", "反向連結", "自家主題頁"):
+        assert text in html
+
+
+def test_reflect_records_why_there_is_no_conclusion(settings, tmp_path):
+    from seo_intel.core.runner import open_memory
+    from seo_intel.llm.types import LLMFatalError
+    from seo_intel.memory.store import MemoryStore
+
+    class NoLLM:
+        def call(self, role, *, system, user, schema):
+            raise LLMFatalError("不呼叫 LLM")
+
+    mem_path = tmp_path / "m.db"
+    mem = open_memory(mem_path)
+    r = run_real({"competitors": [realsite.SITE], "keywords": realsite.KEYWORDS}, settings, lambda d: NoLLM(),
+                 memory=mem, run_root=tmp_path / "runs", client=realsite.client([]), clock=TestClock(), today=TODAY,
+                 history=tmp_path / "h.jsonl")
+    mem.store.close()
+    lines = r.state.reflection["lines"]
+    assert any(x.startswith("未成功的原因：沒有提出可以檢驗的假設") for x in lines)
+    assert any(x.startswith("未成功的原因：資料缺口：沒有排名資料") for x in lines)
+    store = MemoryStore(mem_path)
+    notes = json.loads(store.conn.execute("SELECT notes_json FROM episode_outcomes").fetchone()[0])
+    store.close()
+    assert notes and notes == r.state.reflection["notes"]
+
+
+def test_old_memory_file_gets_notes_column(tmp_path):
+    import sqlite3
+
+    from seo_intel.memory.store import MemoryStore
+
+    path = tmp_path / "old.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE episode_outcomes (episode_id TEXT PRIMARY KEY, scenario TEXT, goal_type TEXT, "
+                "success INTEGER NOT NULL, end_reason TEXT, fetches INTEGER NOT NULL, api_calls INTEGER NOT NULL, "
+                "llm_usd REAL NOT NULL, lessons_json TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, ts TEXT NOT NULL)")
+    con.execute("INSERT INTO episode_outcomes VALUES ('E-old', 's', 'g', 0, 'x', 1, 0, 0, '[]', 0, 't')")
+    con.commit()
+    con.close()
+    store = MemoryStore(path)
+    assert store.conn.execute("SELECT notes_json FROM episode_outcomes").fetchone()[0] == "[]"
+    store.record_outcome({"episode_id": "E-new", "success": False, "fetches": 1, "api_calls": 0, "llm_usd": 0,
+                          "notes": ["缺排名"]})
+    assert json.loads(store.conn.execute("SELECT notes_json FROM episode_outcomes WHERE episode_id='E-new'").fetchone()[0]) == ["缺排名"]
+    store.close()

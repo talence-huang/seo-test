@@ -21,6 +21,9 @@ class MemoryStore:
         self.conn.row_factory = sqlite3.Row
         sql = resources.files("seo_intel.memory").joinpath("schema.sql").read_text(encoding="utf-8")
         self.conn.executescript(sql)
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(episode_outcomes)")}
+        if "notes_json" not in cols:   # 舊記憶檔：補上「未成功的原因」欄位
+            self.conn.execute("ALTER TABLE episode_outcomes ADD COLUMN notes_json TEXT NOT NULL DEFAULT '[]'")
         self.conn.commit()
 
     def close(self) -> None:
@@ -139,9 +142,11 @@ class MemoryStore:
     def record_outcome(self, row: dict) -> None:
         self.conn.execute(
             """INSERT OR REPLACE INTO episode_outcomes (episode_id, scenario, goal_type, success, end_reason, fetches,
-                   api_calls, llm_usd, lessons_json, corrected, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   api_calls, llm_usd, lessons_json, corrected, ts, notes_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (row["episode_id"], row.get("scenario"), row.get("goal_type"), int(row["success"]), row.get("end_reason"),
-             row["fetches"], row["api_calls"], row["llm_usd"], json.dumps(row.get("lessons", [])), 0, utc_now()))
+             row["fetches"], row["api_calls"], row["llm_usd"], json.dumps(row.get("lessons", [])), 0, utc_now(),
+             json.dumps(row.get("notes", []), ensure_ascii=False)))
         self.conn.commit()
 
     def success_rate(self, without_lesson: str | None = None) -> tuple[float | None, int]:

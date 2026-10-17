@@ -216,6 +216,26 @@ def validate_citations(report: dict, st: EpisodeState, claims: list[Claim],
     return out, stats
 
 
+def claim_display(c: Claim) -> dict:
+    """結論的顯示欄位：做法、競品排名頁的值、同網站其他主題頁的值、期間內才採用。"""
+    if c.dimension:
+        m = c.measure
+        topic = "" if m.get("has_serp", True) else "（主題頁）"
+        return {"side": "offpage" if c.claim_type == "offpage_strategy" else "onpage",
+                "practice": strategy.label(c.dimension), "competitor": strategy.fmt(c.dimension, m.get("competitor")) + topic,
+                "others": strategy.fmt(c.dimension, m.get("others")),
+                "adopted": f"{m.get('adopted_in_window', 0)}/{m['n_diffed']} 頁" if m.get("n_diffed") else "—",
+                "new_ref_domains": m.get("new_ref_domains_in_window"), "baseline": m.get("baseline_in_same_length")}
+    return {"side": "onpage", "practice": f"{c.template_prefix} 內容改版：{'、'.join(c.change_types)}",
+            "competitor": "—", "others": "—", "adopted": "—", "new_ref_domains": None, "baseline": None}
+
+
+def action_display(a: PriorityAction) -> dict:
+    return {"competitor": strategy.fmt(a.dimension, a.competitor), "own": strategy.fmt(a.dimension, a.own),
+            "gap": "—" if a.gap is None else f"{a.gap:.0%}", "effort": "低中高"[a.effort - 1],
+            "status": _STATUS_ZH[a.status]}
+
+
 def inconclusive_reasons(st: EpisodeState) -> list[str]:
     """沒有成立的結論時，由程式說明原因：結束原因、抓到多少主題頁、輪廓量到什麼、最接近成立的假設卡在哪裡。"""
     reasons = []

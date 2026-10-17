@@ -6,7 +6,10 @@ import html
 import json
 from typing import Any
 
+from seo_intel.core import strategy
 from seo_intel.core.actions import COMPONENT_LABELS
+from seo_intel.core.claims import action_display, claim_display
+from seo_intel.core.models import Claim, PriorityAction
 from seo_intel.observe.console import llm_line
 from seo_intel.observe.record import StepRecord
 
@@ -99,22 +102,96 @@ def _belief_svg(history: list[dict], hypotheses: list[dict]) -> str:
             f'<text x="2" y="{y(1) + 4:.1f}">1.0</text><text x="2" y="{y(0) + 4:.1f}">0</text></svg></div>')
 
 
+def _conclusion_sections(state: dict) -> str:
+    """研究的三個問題：On-page 策略、Off-page 策略、優先行動；沒有結論時的原因與資料缺口。"""
+    report = state.get("report")
+    if not report:
+        return ""
+    claims = [Claim.model_validate(c) for c in state.get("claims", [])]
+    actions = [PriorityAction.model_validate(a) for a in state.get("actions", [])]
+    task = state["task"]
+
+    def rows(items: list[Claim]) -> str:
+        out = ""
+        for c in items:
+            d = claim_display(c)
+            ok = "ok" if c.validated else "warn"
+            out += (f"<tr><td>{_e(c.id)}</td><td>{_e(c.subject_site)}</td><td>{_e(d['practice'])}</td><td>{_e(d['competitor'])}</td>"
+                    f"<td>{_e(d['others'] if d['side'] == 'onpage' else f'{d['new_ref_domains']}（平常約 {d['baseline']}）')}</td>"
+                    f"<td>{_e(d['adopted'])}</td><td class='{ok}'>{c.confidence:.2f}</td><td>{_e(', '.join(c.evidence_ids))}</td></tr>")
+        return out
+
+    head = "<tr><th>結論</th><th>競品</th><th>做法</th><th>排名頁／量測</th><th>{}</th><th>期間內才採用</th><th>信心</th><th>證據</th></tr>"
+    on = [c for c in claims if claim_display(c)["side"] == "onpage"]
+    off = [c for c in claims if claim_display(c)["side"] == "offpage"]
+    html = (f"<h2>研究結論</h2><p><b>{_e(report.get('headline', ''))}</b></p><p>{_e(report.get('summary', ''))}</p>"
+            f"<h3>1. On-page 策略</h3>"
+            + (f"<div class='wrap'><table>{head.format('同網站其他主題頁')}{rows(on)}</table></div>" if on
+               else "<p class='muted'>沒有成立的 On-page 策略結論。</p>")
+            + "<h3>2. Off-page 策略</h3>"
+            + (f"<div class='wrap'><table>{head.format('期間內新增引用網域')}{rows(off)}</table></div>" if off
+               else f"<p class='muted'>{'沒有提供反向連結資料，無法研究 Off-page 策略。' if task.get('backlink_source', 'none') == 'none' else '沒有成立的 Off-page 策略結論。'}</p>")
+            + "<h3>3. 優先行動（分數＝影響 × 自家差距 ÷ 難度，由程式計算）</h3>")
+    if actions:
+        arows = "".join(
+            f"<tr><td>{_e(a.id)}</td><td>{_e(a.action)}</td><td>{_e(a.label)}</td><td>{_e(d['competitor'])}</td><td>{_e(d['own'])}</td>"
+            f"<td>{_e(d['gap'])}</td><td>{_e(d['effort'])}</td><td>{a.score:.2f}</td><td>{_e(d['status'])}</td><td>{_e(a.claim_id)}</td></tr>"
+            for a, d in ((a, action_display(a)) for a in actions))
+        html += ("<div class='wrap'><table><tr><th>順序</th><th>行動</th><th>做法</th><th>競品</th><th>自家</th><th>差距</th>"
+                 f"<th>難度</th><th>分數</th><th>狀態</th><th>依據</th></tr>{arows}</table></div>")
+    else:
+        html += "<p class='muted'>沒有成立的策略結論，無法排出優先行動。</p>"
+    if report.get("recommendations"):
+        html += "<h3>建議</h3><ul>" + "".join(f"<li>{_e(x)}</li>" for x in report["recommendations"]) + "</ul>"
+    if report.get("inconclusive_reasons"):
+        html += "<h3 class='warn'>為什麼沒有結論</h3><ul>" + "".join(f"<li>{_e(x)}</li>" for x in report["inconclusive_reasons"]) + "</ul>"
+    if report.get("data_gaps"):
+        html += "<h3>資料缺口</h3><ul>" + "".join(f"<li>{_e(x)}</li>" for x in report["data_gaps"]) + "</ul>"
+    return html
+
+
+def _profile_sections(state: dict) -> str:
+    """三種輪廓（程式量測）：排名頁 vs 其他主題頁（與自家）、反向連結。"""
+    obs = state.get("observations", [])
+    own = next((o["data"]["profile"] for o in reversed(obs) if o["kind"] == "own_profile"), None)
+    html = ""
+    for o in (o for o in obs if o["kind"] == "onpage_profile"):
+        d = o["data"]
+        rows = ""
+        for r in sorted(d["contrast"], key=lambda r: r["p"]) or [{"dimension": k, "group": None, "others": v, "p": None}
+                                                                 for k, v in d["others_profile"].items()]:
+            key = r["dimension"]
+            own_cell = f"<td>{_e(strategy.fmt(key, own.get(key)))}</td>" if own is not None else ""
+            p_cell = "—" if r.get("p") is None else f"{r['p']:.3f}"
+            rows += (f"<tr><td>{_e(strategy.label(key))}</td><td>{_e(strategy.fmt(key, r.get('group')))}</td>"
+                     f"<td>{_e(strategy.fmt(key, r.get('others')))}</td><td>{p_cell}</td>"
+                     f"<td>{d['adopted_in_window'].get(key, 0)}</td>{own_cell}</tr>")
+        own_head = "<th>自家主題頁</th>" if own is not None else ""
+        title = (f"排名頁 {d['n_ranking']} 頁 vs 同網站其他主題頁 {d['n_others']} 頁" if d["has_serp"]
+                 else f"主題頁 {d['n_others']} 頁（沒有排名資料）")
+        html += (f"<h3>{_e(d['site'])}：{title}（{_e(o['id'])}；改版前後比對 {d.get('n_diffed', 0)} 頁）</h3><div class='wrap'><table>"
+                 f"<tr><th>做法</th><th>排名頁</th><th>其他主題頁</th><th>檢定 p</th><th>期間內才採用（頁）</th>{own_head}</tr>{rows}</table></div>")
+    links = [o for o in obs if o["kind"] == "link_profile"]
+    if links:
+        lrows = "".join(
+            f"<tr><td>{_e(('自家 ' if o['data'].get('own') else '') + o['data']['site'])}</td><td>{o['data']['n_links']}</td>"
+            f"<td>{o['data']['n_ref_domains']}</td><td>{o['data']['new_ref_domains_in_window']}（平常約 {o['data']['baseline_in_same_length']}）</td>"
+            f"<td>{_e(strategy.fmt('anchor_keyword', (o['data'].get('anchor_share') or {}).get('keyword', 0)))}</td>"
+            f"<td>{_e(strategy.fmt('link_to_ranking', o['data'].get('share_to_ranking_pages')))}</td></tr>" for o in links)
+        html += ("<h3>反向連結</h3><div class='wrap'><table><tr><th>網站</th><th>連結</th><th>引用網域</th><th>期間內新增引用網域</th>"
+                 f"<th>錨點含關鍵字</th><th>指向排名頁</th></tr>{lrows}</table></div>")
+    return f"<h2>輪廓（程式量測的做法）</h2>{html}" if html else ""
+
+
 def _research_sections(state: dict) -> str:
-    claims = state.get("claims", [])
     hyps = state.get("hypotheses", [])
     evidence = state.get("evidence", [])
     if not hyps:
         return ""
     report = state.get("report") or {}
-    claim_rows = "".join(
-        f"<tr><td>{_e(c['id'])}</td><td>{_e(c['subject_site'])}</td><td><code>{_e(c['template_prefix'])}</code></td>"
-        f"<td>{_e(', '.join(c['change_types']))}</td><td>{_e(' ～ '.join(c['date_window'] or []))}</td>"
-        f"<td>{c['confidence']:.2f}</td><td>{_e(', '.join(c['evidence_ids']))}</td>"
-        f"<td class='{'ok' if c['validated'] else 'warn'}'>{'✓' if c['validated'] else '✗'}</td></tr>" for c in claims)
-    claims_html = (f"<table><tr><th>主張</th><th>網站</th><th>範本</th><th>變動類型</th><th>時間窗</th><th>信心</th>"
-                   f"<th>證據</th><th>驗證</th></tr>{claim_rows}</table>") if claims else "<p class='muted'>沒有假設達到成立門檻。</p>"
     hyp_rows = "".join(
-        f"<tr><td>{_e(h['id'])}</td><td><code>{_e(h['category'])}</code></td><td>{_e(h.get('template') or '—')}</td>"
+        f"<tr><td>{_e(h['id'])}</td><td><code>{_e(h['category'])}</code></td>"
+        f"<td>{_e(strategy.label(h['dimension']) if h.get('dimension') else (h.get('template') or '—'))}</td>"
         f"<td>{_e(h['statement'])}<div class='muted'>預測：{_e(h['prediction'])}<br>反證：{_e(h['falsification'])}</div></td>"
         f"<td>{h['prior']:.2f} → <b>{h['posterior']:.2f}</b></td><td>{_STATUS_ZH[h['status']]}"
         f"{'（已紅隊驗證）' if h.get('verified') else ''}{'<br><span class=warn>' + _e(h['note']) + '</span>' if h.get('note') else ''}</td></tr>"
@@ -128,10 +205,10 @@ def _research_sections(state: dict) -> str:
     head = (f"<p><b>{_e(report.get('headline', ''))}</b></p><p>{_e(report.get('summary', ''))}</p>"
             + (f"<p class='muted'>混淆因子：{_e(report['confounder'])}</p>" if report.get("confounder") else "")
             + (f"<p class='muted'>引用驗證：有效 {cit.get('valid', 0)}、移除無效引用 {cit.get('invalid_removed', 0)}</p>" if cit else ""))
-    return (f"<h2>結論（程式由證據推導的結構化主張）</h2>{head}<div class='wrap'>{claims_html}</div>"
+    return (f"<h2>引用驗證與混淆因子</h2>{head}"
             f"<h2>假設信心隨證據累積的變化（橫軸＝第幾筆證據；滑鼠移到點上看證據 ID；虛線：成立 0.8／推翻 0.2）</h2>"
             f"{_belief_svg(state.get('belief_history', []), hyps)}"
-            f"<h2>假設</h2><div class='wrap'><table><tr><th>ID</th><th>類別</th><th>範本</th><th>主張、預測與反證</th>"
+            f"<h2>假設</h2><div class='wrap'><table><tr><th>ID</th><th>類別</th><th>做法／範本</th><th>主張、預測與反證</th>"
             f"<th>先驗 → 信心</th><th>狀態</th></tr>{hyp_rows}</table></div>"
             f"<h2>證據（{len(evidence)}）</h2><div class='wrap'><table><tr><th>ID</th><th>假設</th><th>探針</th><th>方向</th>"
             f"<th>強度</th><th>觀察</th><th>判定依據</th></tr>{ev_rows}</table></div>")
@@ -238,6 +315,8 @@ def render_timeline(records: list[StepRecord], state: dict, frontier: dict | Non
 競品 {_e(', '.join(task['competitors']))} · 研究期間 {_e(goal.get('window_start'))} ～ {_e(goal.get('window_end'))} ·
 關鍵字 {_e(', '.join(goal.get('topic_keywords', [])))}</div>
 <div class="cards">{''.join(f'<div class="card"><span>{_e(k)}</span><b>{_e(v)}</b></div>' for k, v in cards)}</div>
+{_conclusion_sections(state)}
+{_profile_sections(state)}
 {_research_sections(state)}
 {_memory_section(state)}
 {_autonomy_section(state)}

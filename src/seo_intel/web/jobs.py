@@ -282,18 +282,25 @@ def episode_summary(run_dir: Path) -> dict:
     """前端用的 episode 摘要：結論、假設、報告、核准、限制、學到什麼。"""
     if not (run_dir / "checkpoint.json").is_file():
         return {}
+    from seo_intel.core.claims import action_display, claim_display
+    from seo_intel.core.strategy import label
+
     st, _ = load_checkpoint(run_dir)
     pa = st.pending_approval
     rep = st.report or {}
     return {
         "id": st.id, "label": st.task.label, "question": st.task.question, "keywords": st.task.keywords,
+        "task": {"own_site": st.task.own_site, "serp_source": st.task.serp_source,
+                 "backlink_source": st.task.backlink_source},
         "status": st.status, "end_reason": st.end_reason, "phase": st.phase, "seq": st.seq,
         "budget": st.budget.model_dump(), "goal": st.goal.model_dump(mode="json") if st.goal else None,
-        "claims": [c.model_dump(mode="json") for c in st.claims],
+        "claims": [{**c.model_dump(mode="json"), "display": claim_display(c)} for c in st.claims],
+        "actions": [{**a.model_dump(mode="json"), "display": action_display(a)} for a in st.actions],
         "hypotheses": [{"id": h.id, "category": h.category, "statement": h.statement, "template": h.template,
+                        "practice": label(h.dimension) if h.dimension else None,
                         "status": h.status, "posterior": round(h.posterior, 3)} for h in st.hypotheses],
         "report": {k: rep.get(k) for k in ("headline", "summary", "findings", "caveats", "recommendations",
-                                           "citations")},
+                                           "citations", "inconclusive_reasons", "data_gaps")},
         "approvals": [a.model_dump(mode="json") for a in st.approvals],
         "pending_approval": pa.model_dump(mode="json") if pa else None,
         "limitations": st.limitations, "security_events": st.security_events,
