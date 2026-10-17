@@ -1,20 +1,8 @@
 # seo-intel
 
-可觀察的自主 SEO 競爭情報研究 Agent（研究用途）。
+可觀察的 SEO 競爭情報研究 Agent：輸入競品網址與關鍵字，Agent 會自己規劃、抓取競品網站、比對頁面歷史版本、提出並檢驗假設，最後給出有證據支撐的結論——每一步的決策、理由與證據都看得到。
 
-研究目標：實作一個**用程式寫成、每一步都可觀察**的研究迴圈，在有限預算下從數萬頁網站中找出有證據支撐的結論；並驗證經驗回流能讓後續分析**可量化地**變好。研究環境為可重現的模擬世界 SimWeb，不連接真實資料源。
-
-## 目前進度
-
-| Phase | 內容 | 狀態 |
-|---|---|---|
-| 0 | 專案骨架、SQLite schema、LLM client（結構化輸出、成本計量、FakeLLM、錄製重播） | 完成（Haiku 與 Opus 角色皆已真實驗證） |
-| 1 | SimWeb 研究環境（6 個情境、反爬行為、陷阱、注入頁、模擬排名與歷史、自動推導標準答案） | 完成 |
-| 2 | 研究迴圈與可觀察性（狀態機、工具層、Frontier、預算、PolicyGate 基本版、即時主控台、trace、timeline、暫停續跑） | 完成 |
-| 3 | 假設、證據與報告（可證偽假設、6 種證據探針、log-odds 信心、紅隊驗證、結構化主張、引用驗證） | 完成 |
-| 4 | 學習機制（M1 經驗庫、M2 URL 價值、REFLECT、人工糾偏、經驗治理） | 完成（FakeLLM 驗證：s1 連跑抓取 69 → 49 → 38） |
-| 5 | 自治邊界與失效處置（完整 PolicyGate、人工核准流程、注入防護、混沌測試） | 完成（被攻陷的 LLM 也無法讓 Agent 越界或改變結論） |
-| 6 | 評測與研究成果收斂（確定性評分、Day 1 / Day N 協定、消融、緊縮預算、[研究成果](docs/07-research-findings.md)） | 完成（FakeLLM：學習後抓取 −25%；真實 LLM 評測列為未來工作） |
+> 本專案原本是研究原型（在模擬世界 SimWeb 中以確定性的假 LLM 做評測）。2026-10-17 起移除了模擬世界、假 LLM 與評測工具，只保留研究真實網站的功能；研究期間的完整版本與數據保留在 git 標籤 `research-final`（見 [docs/07](docs/07-research-findings.md)）。
 
 ## 安裝
 
@@ -23,7 +11,14 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-真實 LLM 呼叫需要 Anthropic API 金鑰：在專案根目錄的 `.env` 填入 `ANTHROPIC_API_KEY=...`（若沒有 `.env`，從 `.env.example` 複製一份）。`.env` 不會被 commit；已存在的系統環境變數優先。可用 `seo-intel config show` 確認是否已讀到金鑰。
+在專案根目錄的 `.env` 填入金鑰（若沒有 `.env`，從 `.env.example` 複製一份；`.env` 不會被 commit）：
+
+| 金鑰 | 必要性 | 用途 |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | 必要 | Agent 的規劃、假設、紅隊驗證與報告使用真實 Opus（每次研究約 US$0.3） |
+| `SERPAPI_API_KEY` | 選填 | 取得 Google 台灣的真實搜尋結果（[SerpApi](https://serpapi.com/)，按次計費） |
+
+可用 `seo-intel config show` 確認是否已讀到金鑰。
 
 ## 網頁介面（最簡單的用法）
 
@@ -35,16 +30,13 @@ seo-intel web
 
 | 分頁 | 可以做什麼 |
 |---|---|
-| 研究 | 選情境、LLM、記憶、預算與世界種子後開始研究；即時看到每一步（點一下展開理由、候選行動與分數、LLM 輸出、HTTP 請求）；逐步模式可按「下一步／連續執行／暫停並存檔」；結束後看結論、假設、限制、學到什麼，開啟完整時間軸，或糾正結論 |
+| 研究 | 輸入競品網址、關鍵字（每行一個）、研究期間與排名資料來源後開始研究；即時看到每一步（點一下展開理由、候選行動與分數、LLM 輸出、HTTP 請求）；逐步模式可按「下一步／連續執行／暫停並存檔」；結束後看結論、假設、限制、學到什麼，開啟完整時間軸，或糾正結論 |
 | 紀錄與核准 | 所有研究紀錄；待核准的請求（附預估）可直接核准或拒絕，Agent 隨即續跑；暫停的研究可繼續 |
 | 記憶 | 經驗庫（狀態、來源、套用成效、程式套用的偏置、稽核軌跡、淘汰）、人工糾偏紀錄、每次研究的成效、M2 範本價值 |
-| 評測 | 執行 Day 1 → 訓練 → Day N → 消融 → 緊縮預算，並瀏覽評測報告 |
 
 網頁與下列指令共用同一套檢查點、trace 與資料庫，兩者可以交替使用。
 
-## 研究真實網站
-
-在網頁的「研究」分頁選「真實網站」，輸入競品網址、關鍵字（每行一個）、研究期間與排名資料來源；或用指令：
+## 研究怎麼進行
 
 ```powershell
 seo-intel research --site https://example.com --keyword 高山茶 --keyword 烏龍茶 --serp serpapi --max-fetches 80
@@ -54,52 +46,42 @@ seo-intel research --site https://example.com --keyword 高山茶 --keyword 烏�
 |---|---|---|
 | 網站結構、頁面內容 | 直接抓取（robots.txt → sitemap，沒有 sitemap 時從首頁連結開始） | 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔 |
 | 頁面改了什麼 | Wayback Machine 歷史快照（免費） | 部分頁面可能沒有快照 |
-| 目前的搜尋排名 | `--serp serpapi`：SerpApi 取得 Google 台灣結果（在 `.env` 填 `SERPAPI_API_KEY`，按次計費）；`--serp csv --serp-csv 檔案`：從 Semrush、Ahrefs、Search Console 匯出的「關鍵字、排名、網址」；`--serp none`：不使用 | 不直接爬 Google（違反服務條款）；每次查到的排名都會存進 `data/serp_history.jsonl`，下次研究同一個關鍵字時就能算出名次變化 |
+| 目前的搜尋排名 | `--serp serpapi`：SerpApi 取得 Google 台灣結果；`--serp csv --serp-csv 檔案`：從 Semrush、Ahrefs、Search Console 匯出的「關鍵字、排名、網址」；`--serp none`：不使用 | 不直接爬 Google（違反服務條款）；每次查到的排名都會存進 `data/serp_history.jsonl`，下次研究同一個關鍵字時就能算出名次變化 |
 | 排名歷史 | 沒有 | 所以研究的是「競品在這些關鍵字做了什麼內容策略」，不是「我們為什麼掉排名」 |
 
-- 真實網站沒有標準答案，結論的可信度來自證據本身（每個主張都能點回原始觀察）。
-- 建議搭配真實 Opus（`--llm live`）：假 LLM 只是測試用的規則式替身，常常提不出假設。
+- 真實網站沒有標準答案，結論的可信度來自證據本身（每個主張都由程式從證據推導，能點回原始觀察）。
+- 高風險動作（預算用盡要延長、抓取任務以外的網域、封鎖率過高仍要繼續）會暫停等你核准。
 - 研究的合法性與合規性由使用者負責，例如目標產業在當地是否合法、網站的使用條款。
 
 ## 指令
 
 ```powershell
-seo-intel version          # 版本與 schema 版本
-seo-intel web              # 本機網頁介面（--port 換埠、--no-open 不自動開瀏覽器）
-seo-intel config show      # 目前生效的模型、價格、預算、自治邊界設定
-seo-intel db init          # 建立 data/intel.db
-seo-intel db info          # 資料表與筆數
-seo-intel llm ping         # 一次真實 API 呼叫，顯示 token 與成本
-seo-intel simweb list                    # 列出研究情境
-seo-intel simweb inspect --scenario s1   # 情境細節、標準答案、植入效應可觀察性
-seo-intel simweb fetch -s s1 <網址>      # 在模擬世界中抓取一個網址
-seo-intel research --scenario s1 --step  # 逐步觀察研究迴圈（--llm fake 免費）
+seo-intel web                            # 本機網頁介面（--port 換埠、--no-open 不自動開瀏覽器）
+seo-intel research --site <網址> -k <關鍵字> [--serp none|serpapi|csv] [--step]   # 研究競品網站
 seo-intel research resume <episode>      # 從檢查點續跑（沿用原本的記憶與預算設定；先套用人工核准的決定）
-seo-intel research -s s1 --no-memory     # 不用記憶（Day 1）；--memory <檔案> 指定記憶、--ablate M1,M2 消融
-seo-intel research --site <網址> -k <關鍵字> --serp none|serpapi|csv   # 研究真實網站（見上方說明）
-seo-intel research -s s1 --max-fetches 30 --step   # 緊縮預算：預算用盡時暫停請求核准（--step 可當場決定）
 seo-intel approvals list                 # 待核准的請求（--all 含已決定的）
 seo-intel approvals approve <A-id|episode> --note "..."   # 核准（一次性、24 小時內有效）
 seo-intel approvals reject <A-id|episode> --note "..."    # 拒絕：改走降級路徑並寫入報告限制
-seo-intel eval protocol --llm fake         # 評測：Day 1 → 訓練 → Day N → 消融 → 緊縮預算（--test-offset 換新種子）
-seo-intel eval protocol --llm live --quick --max-usd 8   # 真實 LLM 評測（必須給花費上限）
+seo-intel feedback correct <episode> --claim C1 --verdict wrong --reason "..."   # 糾正結論（--no-llm 只保存理由原文）
+seo-intel feedback list                  # 糾偏紀錄
 seo-intel memory list                    # 經驗庫：狀態、來源、支持數、套用成效（--all 含已淘汰）
 seo-intel memory show L-1                # 一條經驗的內容與稽核軌跡
-seo-intel memory stats                   # M2 範本價值與 episode 成效
+seo-intel memory stats                   # M2 範本價值與每次研究的成效
 seo-intel memory snapshot <檔案>         # 備份記憶
 seo-intel memory retire L-1 --reason ... # 人工淘汰經驗
-seo-intel feedback correct <episode> --claim C1 --verdict wrong --reason "..."   # 人工糾偏
-seo-intel feedback list                  # 糾偏紀錄
-seo-intel trace list                     # 列出 episode
+seo-intel trace list                     # 列出研究紀錄
 seo-intel trace show <episode>           # 終端機重播完整時間軸
 seo-intel trace html <episode>           # 產生 runs/<episode>/timeline.html
+seo-intel config show                    # 目前生效的模型、價格、預算、自治邊界設定
+seo-intel llm ping                       # 一次真實 API 呼叫，顯示 token 與成本
+seo-intel db init / db info              # 建立 data/intel.db、查看資料表與筆數
 ```
 
 ## 測試
 
 ```powershell
-pytest              # 單元測試（不連網、不花費）
-pytest -m live      # 真實 API 測試（少量費用）
+pytest              # 單元測試（不連網、不呼叫 LLM、不花費）
+pytest -m live      # 端對端研究與 API 測試（呼叫真實 Opus，少量費用；網站以模擬傳輸代替）
 ```
 
 ## 文件
@@ -113,7 +95,9 @@ pytest -m live      # 真實 API 測試（少量費用）
 | [04 研究迴圈與可觀察性](docs/04-research-loop.md) | 需求 A |
 | [05 學習機制與 Evals](docs/05-memory-and-evals.md) | 需求 B |
 | [06 失效模式與自治邊界](docs/06-reliability-and-autonomy.md) | 需求 C |
-| [07 研究成果](docs/07-research-findings.md) | RQ1–RQ3 的數據、發現、限制與未來工作 |
+| [07 研究成果](docs/07-research-findings.md) | 研究期間（模擬世界）的數據、發現、限制與未來工作 |
+
+docs/00–07 記錄的是研究期間的設計與成果，其中提到的 SimWeb、FakeLLM 與評測工具已移除，可從標籤 `research-final` 取回。
 
 ## 專案結構
 
@@ -122,18 +106,14 @@ config/            模型、價格、預算、自治邊界設定
 src/seo_intel/
   config.py        設定載入與驗證
   store/           SQLite schema 與存取層
-  llm/             Anthropic client、成本計量、FakeLLM、錄製重播、角色 prompt
-  core/            研究迴圈：狀態機、步驟、行動候選、Frontier、預算、PolicyGate、檢查點
-  tools/           HTTP 包裝層、萃取、差異、排名、歷史快照、網站探勘
-  observe/         即時主控台、trace、資料庫紀錄、timeline.html
-  real/            真實網站研究：SERP 來源（SerpApi / CSV）、Wayback 歷史、執行環境
-  web/             本機網頁介面（標準庫 HTTP 伺服器 + 單頁前端，無額外套件）
-  evals/           評測：確定性評分器、Day 1 / Day N 協定、報告
+  llm/             Anthropic client、成本計量、錄製重播、角色 prompt
+  core/            研究迴圈：狀態機、步驟、行動候選、Frontier、預算、PolicyGate、核准、檢查點
+  tools/           HTTP 包裝層、萃取、差異、分詞、歷史快照比對、網站探勘
+  real/            研究環境：SERP 來源（SerpApi / CSV）、Wayback 歷史、真實時鐘與任務建立
   memory/          記憶：經驗庫（M1）、URL 價值先驗（M2）、REFLECT 規則、人工糾偏、治理（data/memory.db）
+  observe/         即時主控台、trace、資料庫紀錄、timeline.html
+  web/             本機網頁介面（標準庫 HTTP 伺服器 + 單頁前端，無額外套件）
   cli.py           seo-intel 指令
-src/simweb/        研究環境（獨立套件）：世界產生器、反爬行為、模擬排名與歷史 API
-evals/scenarios/   6 個研究情境（4 訓練 / 2 測試）
-evals/reports/     評測輸出（不納入版控）
-tests/             單元測試
+tests/             單元測試（tests/realsite.py 是以模擬傳輸代替真實網站的測試資料）
 docs/              設計文件
 ```

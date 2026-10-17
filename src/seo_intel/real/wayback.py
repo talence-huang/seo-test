@@ -1,6 +1,6 @@
 """真實網站的歷史版本：Internet Archive 的 Wayback Machine（免費、不需金鑰）。
 
-與模擬世界的 ArchiveClient 同一個介面：snapshots(url) 列出有快照的日期、snapshot(url, 日期) 取回當時的 HTML。
+介面：snapshots(url) 列出有快照的日期、snapshot(url, 日期) 取回當時的 HTML（供 tools/history.py 比對）。
 用 `id_` 網址取得原始頁面（不含 Wayback 的工具列），並對 web.archive.org 保持禮貌的請求間隔。
 """
 

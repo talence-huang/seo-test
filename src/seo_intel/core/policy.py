@@ -97,7 +97,7 @@ class PolicyGate:
                                                  f"{self.cfg.block_rate_threshold:.0%}")
         if action.tool == "discover" and not self.ledger.can_fetch(domain, EST_DISCOVER_FETCHES):
             return "exceed_budget", "探勘所需抓取次數將超過預算上限"
-        if action.tool in ("rank_scan", "serp_scan", "history_diff") and not self.ledger.can_call_api(2):
+        if action.tool in ("serp_scan", "history_diff") and not self.ledger.can_call_api(2):
             return "exceed_budget", "API 呼叫次數將超過預算上限"
         return None
 

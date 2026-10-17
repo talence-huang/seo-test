@@ -188,7 +188,7 @@ def reflect(ctx: EpisodeContext) -> tuple[list[str], dict]:
         for d in derive(ctx, success):
             _upsert(store, d, st.id, lines)
         govern_applied(ctx, store, success, lines)
-    store.record_outcome({"episode_id": st.id, "scenario": st.task.scenario,
+    store.record_outcome({"episode_id": st.id, "scenario": st.task.label,
                           "goal_type": st.goal.goal_type if st.goal else None, "success": success,
                           "end_reason": st.end_reason, "fetches": st.budget.fetches, "api_calls": st.budget.api_calls,
                           "llm_usd": st.budget.llm_usd, "lessons": sorted(st.lessons_applied)})

@@ -22,9 +22,9 @@ from seo_intel.config import PROJECT_ROOT, get_settings
 from seo_intel.core import approvals
 from seo_intel.core.episode import RUNS_DIR, load_checkpoint
 from seo_intel.core.runner import DEFAULT_MEMORY
-from seo_intel.web.jobs import REPORTS_DIR, JobManager, episode_summary, make_llm
+from seo_intel.web.jobs import JobManager, episode_summary, make_llm
 
-SERVE_ROOTS = {"runs": RUNS_DIR, "reports": REPORTS_DIR}
+SERVE_ROOTS = {"runs": RUNS_DIR}
 _EPISODE = re.compile(r"^E-[\w-]+$")
 
 
@@ -59,10 +59,12 @@ def _state_dict(run_dir: Path) -> dict:
 
 
 def _label(task: dict) -> str:
-    """情境代號；真實網站則顯示「網站：關鍵字」。"""
-    if task.get("mode") == "real":
-        return f"{'、'.join(task['competitors'])}：{'、'.join(task.get('keywords') or [])}"
-    return task.get("scenario") or "—"
+    return f"{'、'.join(task['competitors'])}｜{'、'.join(task.get('keywords') or [])}"
+
+
+def _legacy(st: dict) -> bool:
+    """舊版的模擬情境 episode（模擬世界已移除，無法開啟或續跑）。"""
+    return bool(st["task"].get("scenario")) or not st["task"].get("keywords")
 
 
 def _pending(st: dict) -> dict | None:
@@ -96,20 +98,15 @@ class App:
                 "has_serp_key": bool(os.environ.get("SERPAPI_API_KEY")), "busy": busy.info() if busy else None,
                 "memory": str(DEFAULT_MEMORY), "budget": get_settings().budget.model_dump()}
 
-    def scenarios(self) -> list[dict]:
-        from simweb.sim import list_scenarios
-
-        return [{"id": s.id, "split": s.split, "archetype": s.archetype, "seed": s.seed, "goal_type": s.goal.type,
-                 "question": s.goal.question, "own_site": s.goal.own_site, "competitors": list(s.goal.competitors)}
-                for s in list_scenarios()]
-
     def episodes(self) -> list[dict]:
         out = []
         for d in _episode_dirs():
             st = _state_dict(d)
+            if _legacy(st):
+                continue
             job = self.jobs.by_episode.get(st["id"])
             pa = _pending(st)
-            out.append({"id": st["id"], "scenario": _label(st["task"]), "seed": st.get("world_seed"),
+            out.append({"id": st["id"], "label": _label(st["task"]),
                         "status": st["status"], "end_reason": st.get("end_reason"), "seq": st["seq"],
                         "fetches": st["budget"]["fetches"], "llm_usd": round(st["budget"]["llm_usd"], 4),
                         "claims": [c["template"] for c in st.get("claims") or []],
@@ -120,8 +117,8 @@ class App:
         out = []
         for d in _episode_dirs():
             st = _state_dict(d)
-            if (a := _pending(st)) is not None:
-                out.append({"episode": st["id"], "scenario": _label(st["task"]), **a})
+            if not _legacy(st) and (a := _pending(st)) is not None:
+                out.append({"episode": st["id"], "label": _label(st["task"]), **a})
         return out
 
     def memory(self, path: Path) -> dict:
@@ -154,18 +151,6 @@ class App:
         finally:
             store.close()
 
-    def evals(self) -> list[dict]:
-        if not REPORTS_DIR.is_dir():
-            return []
-        return [{"name": d.name, "has_report": (d / "report.md").is_file()}
-                for d in sorted(REPORTS_DIR.iterdir(), reverse=True) if d.is_dir()]
-
-    def eval_report(self, name: str) -> dict:
-        d = REPORTS_DIR / name
-        if d.parent != REPORTS_DIR or not (d / "report.md").is_file():
-            raise KeyError(name)
-        return {"name": name, "markdown": (d / "report.md").read_text(encoding="utf-8")}
-
     # ---------- 寫入 ----------
 
     def feedback(self, p: dict) -> dict:
@@ -179,8 +164,7 @@ class App:
             raise ValueError("需要判定（correct / wrong / partial）與理由")
         run_dir = RUNS_DIR / eid
         state, _ = load_checkpoint(run_dir)
-        llm = p.get("llm", "fake")
-        client = None if verdict == "correct" else make_llm(llm, get_settings(), run_dir)
+        client = None if verdict == "correct" or p.get("no_llm") else make_llm(get_settings(), run_dir)
         store = MemoryStore(project_path(p.get("memory"), DEFAULT_MEMORY))
         try:
             res = correct(store, state, claim, verdict, reason, client)
@@ -266,8 +250,6 @@ def make_handler(app: App, port: int):
                     return self._file(path.removeprefix("/files/"))
                 if path == "/api/status":
                     return self._json(app.status())
-                if path == "/api/scenarios":
-                    return self._json(app.scenarios())
                 if path == "/api/episodes":
                     return self._json(app.episodes())
                 if m := re.fullmatch(r"/api/episodes/([\w-]+)", path):
@@ -286,10 +268,6 @@ def make_handler(app: App, port: int):
                     return self._json(app.memory(_memory_path(q)))
                 if m := re.fullmatch(r"/api/memory/lesson/(L-\d+)", path):
                     return self._json(app.lesson(_memory_path(q), m[1]))
-                if path == "/api/evals":
-                    return self._json(app.evals())
-                if m := re.fullmatch(r"/api/evals/([\w.-]+)", path):
-                    return self._json(app.eval_report(m[1]))
                 return self._error(404, "not found")
             except KeyError as e:
                 return self._error(404, f"找不到：{e}")
@@ -297,7 +275,7 @@ def make_handler(app: App, port: int):
                 return self._error(500, f"{type(e).__name__}: {e}")
 
         def _file(self, rel: str) -> None:
-            """只提供 runs/ 與 evals/reports/ 底下的檔案（時間軸、報告），防止路徑穿越。"""
+            """只提供 runs/ 底下的檔案（時間軸、報告），防止路徑穿越。"""
             root_key, _, rest = rel.partition("/")
             root = SERVE_ROOTS.get(root_key)
             if root is None:
@@ -330,15 +308,13 @@ def make_handler(app: App, port: int):
                 if m := re.fullmatch(r"/api/jobs/(J\d+)/control", path):
                     return self._json(app.jobs.control(m[1], p.get("action", "")).info())
                 if m := re.fullmatch(r"/api/episodes/(E-[\w-]+)/resume", path):
-                    return self._json(app.jobs.resume(m[1], p.get("llm"), bool(p.get("step"))).info())
+                    return self._json(app.jobs.resume(m[1], bool(p.get("step"))).info())
                 if m := re.fullmatch(r"/api/episodes/(E-[\w-]+)/decide", path):
                     return self._json(app.jobs.decide(m[1], bool(p.get("approve")), p.get("note") or None))
                 if path == "/api/feedback":
                     return self._json(app.feedback(p))
                 if path == "/api/memory/retire":
                     return self._json(app.retire(p))
-                if path == "/api/eval":
-                    return self._json(app.jobs.start_eval(p).info())
                 return self._error(404, "not found")
             except approvals.ApprovalPending as e:
                 return self._error(409, str(e))

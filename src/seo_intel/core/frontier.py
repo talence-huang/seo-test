@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit
 
-from seo_intel.tools.rank import tokens
+from seo_intel.tools.text import tokens
 
 _SLUG_WITH_ID = re.compile(r"^[a-z0-9-]+-\d+$")
 _TRACKING = re.compile(r"^(utm_|fbclid|gclid|sessionid)")

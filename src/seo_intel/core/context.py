@@ -11,10 +11,10 @@ from seo_intel.core.budget import BudgetLedger, Clock
 from seo_intel.core.frontier import Frontier
 from seo_intel.core.models import EpisodeState
 from seo_intel.core.policy import PolicyGate
+from seo_intel.real.serp import RealRankClient
+from seo_intel.real.wayback import WaybackClient
 from seo_intel.llm.types import CallMeta, LLMClient
-from seo_intel.tools.history import ArchiveClient
 from seo_intel.tools.http import HttpToolkit
-from seo_intel.tools.rank import RankClient
 
 
 @dataclass
@@ -25,8 +25,8 @@ class EpisodeContext:
     http: HttpToolkit
     ledger: BudgetLedger
     policy: PolicyGate
-    rank: RankClient
-    archive: ArchiveClient
+    rank: RealRankClient
+    archive: WaybackClient
     clock: Clock
     run_dir: Path
     frontier: Frontier | None = None

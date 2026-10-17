@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,20 +17,20 @@ from seo_intel.core.frontier import Frontier
 from seo_intel.core.models import EpisodeState, TaskInput
 from seo_intel.core.policy import PolicyGate
 from seo_intel.llm.types import LLMClient
-from seo_intel.tools.history import ArchiveClient
 from seo_intel.tools.http import HttpToolkit
-from seo_intel.tools.rank import RankClient
 
 RUNS_DIR = PROJECT_ROOT / "runs"
 CHECKPOINT = "checkpoint.json"
 
 
-def new_episode_id(scenario: str | None) -> str:
-    return f"E-{datetime.now(UTC):%Y%m%d-%H%M%S}-{scenario or 'task'}-{secrets.token_hex(2)}"
+def new_episode_id(domain: str | None) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", (domain or "task").lower()).strip("-")[:30] or "task"
+    return f"E-{datetime.now(UTC):%Y%m%d-%H%M%S}-{slug}-{secrets.token_hex(2)}"
 
 
 def new_state(task: TaskInput, clock: Clock) -> EpisodeState:
-    return EpisodeState(id=new_episode_id(task.scenario), task=task, clock_at=clock.now())
+    return EpisodeState(id=new_episode_id(task.competitors[0] if task.competitors else None), task=task,
+                        clock_at=clock.now())
 
 
 def _block_rate(ctx: EpisodeContext, domain: str) -> tuple[float, int]:
@@ -42,12 +43,12 @@ def _block_rate(ctx: EpisodeContext, domain: str) -> tuple[float, int]:
 
 
 def build_context(state: EpisodeState, settings: Settings, llm: LLMClient, client: httpx.Client, clock: Clock,
-                  run_dir: Path, frontier: Frontier | None = None, memory=None, tools=None) -> EpisodeContext:
-    """tools：HttpToolkit → (排名工具, 歷史快照工具)；預設是模擬世界的 API，真實網站模式換成 SERP 來源與 Wayback。"""
+                  run_dir: Path, frontier: Frontier | None = None, memory=None, *, tools) -> EpisodeContext:
+    """tools：HttpToolkit → (SERP 工具, 歷史快照工具)，見 real/env.py 的 tools_factory。"""
     run_dir.mkdir(parents=True, exist_ok=True)
     ledger = BudgetLedger(settings.budget, state.budget, clock)
     http = HttpToolkit(client, clock, ledger, rate_interval=settings.policy.rate_limit_seconds_per_domain)
-    rank, archive = tools(http) if tools else (RankClient(http), ArchiveClient(http))
+    rank, archive = tools(http)
     ctx = EpisodeContext(state=state, settings=settings, llm=llm, http=http, ledger=ledger, policy=None,
                          rank=rank, archive=archive, clock=clock, run_dir=run_dir, frontier=frontier, memory=memory)
     ctx.policy = PolicyGate(settings.policy, state.task, http, ledger, block_rate=lambda d: _block_rate(ctx, d),

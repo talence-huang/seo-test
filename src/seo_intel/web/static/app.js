@@ -42,7 +42,6 @@ function switchTab(name) {
   $$(".tab").forEach((s) => { s.hidden = s.id !== `tab-${name}`; });
   if (name === "episodes") loadEpisodes();
   if (name === "memory") loadMemory();
-  if (name === "eval") loadEvalList();
 }
 $$(".tabs button").forEach((b) => b.addEventListener("click", () => switchTab(b.dataset.tab)));
 
@@ -53,11 +52,10 @@ async function refreshStatus() {
     STATUS = await api("/api/status");
     $("#version").textContent = `v${STATUS.version}`;
     const busy = STATUS.busy;
-    $("#statusline").innerHTML = busy ? `執行中：${esc(busy.kind === "eval" ? "評測" : busy.episode_id)} ${pill(busy.status)}` : "閒置";
+    $("#statusline").innerHTML = busy ? `執行中：${esc(busy.episode_id)} ${pill(busy.status)}` : "閒置";
     if (busy && busy.kind === "research" && RUN.jobId === null) watchJob(busy.id, true);   // 重新整理頁面後接回進行中的研究
-    $("#llm-live").disabled = !STATUS.has_key;
-    $("#key-hint").textContent = STATUS.has_key ? "" : "沒有偵測到 API 金鑰（.env 的 ANTHROPIC_API_KEY），只能使用假 LLM。";
-    $("#eval-live").disabled = !STATUS.has_key;
+    $("#key-hint").innerHTML = STATUS.has_key ? "" : '<span class="error">沒有偵測到 Anthropic 金鑰：請在 .env 填入 ANTHROPIC_API_KEY 後重新啟動 seo-intel web。</span>';
+    if (!STATUS.has_key) $("#start-btn").disabled = true;
     updateSerpHint();
     const pending = await api("/api/approvals");
     const badge = $("#pending-badge");
@@ -67,31 +65,6 @@ async function refreshStatus() {
 }
 
 // ---------- 研究表單 ----------
-let SCENARIOS = [];
-async function loadScenarios() {
-  SCENARIOS = await api("/api/scenarios");
-  $("#scenario").innerHTML = SCENARIOS.map((s) => `<option value="${esc(s.id)}">${esc(s.id)}（${s.split === "train" ? "訓練" : "測試"}）`
-    + `${esc(s.goal_type === "ranking_drop_cause" ? "排名下滑原因" : "競品內容策略")}</option>`).join("");
-  describeScenario();
-}
-function describeScenario() {
-  const s = SCENARIOS.find((x) => x.id === $("#scenario").value);
-  if (s) $("#scenario-desc").innerHTML = `${esc(s.question)}<br>自家站 <code>${esc(s.own_site)}</code>；競品 `
-    + s.competitors.map((c) => `<code>${esc(c)}</code>`).join("、");
-}
-$("#scenario").addEventListener("change", describeScenario);
-$("#memory-mode").addEventListener("change", (e) => { $("#memory-path").hidden = e.target.value !== "custom"; });
-
-function researchMode() { return new FormData($("#research-form")).get("mode"); }
-function updateMode() {
-  const real = researchMode() === "real";
-  $("#real-fields").hidden = !real;
-  $("#sim-fields").hidden = real;
-  $("#seed-label").hidden = real;
-  $("#llm-real-hint").hidden = !real;
-  $("#max-fetches").placeholder = real ? "建議 80" : "預設 300";
-  updateSerpHint();
-}
 function updateSerpHint() {
   const src = $("#serp-source").value;
   $("#serp-csv").hidden = src !== "csv";
@@ -101,7 +74,6 @@ function updateSerpHint() {
     : src === "csv" ? "CSV 需要「關鍵字、排名、網址」三欄（英文欄名 Keyword / Position / URL 也可以）。"
     : "沒有排名資料時，Agent 從 sitemap、頁面內容與歷史版本推斷競品的內容策略。";
 }
-$$('#research-form input[name="mode"]').forEach((r) => r.addEventListener("change", updateMode));
 $("#serp-source").addEventListener("change", updateSerpHint);
 const readFile = (file) => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsText(file, "utf-8"); });
 const lines = (v) => String(v || "").split(/[\n,，、]+/).map((x) => x.trim()).filter(Boolean);
@@ -110,24 +82,20 @@ $("#research-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
   const mode = f.get("memory");
-  const body = { mode: f.get("mode"), llm: f.get("llm"), step: f.get("step") === "on",
+  const body = { step: f.get("step") === "on",
     memory: mode === "custom" ? (f.get("memory_path") || "default") : mode, ablate: f.getAll("ablate"),
     max_fetches: f.get("max_fetches") || null, max_llm_usd: f.get("max_llm_usd") || null };
   showError($("#research-error"), null);
-  if (body.mode === "real") {
-    Object.assign(body, { competitors: lines(f.get("competitors")), keywords: lines(f.get("keywords")),
-      own_site: f.get("own_site") || null, start: f.get("start") || null, end: f.get("end") || null,
-      serp_source: f.get("serp_source") });
-    if (!body.competitors.length || !body.keywords.length) { showError($("#research-error"), "請至少填一個競品網址與一個關鍵字"); return; }
-    if (body.serp_source === "csv") {
-      const file = $("#serp-csv").files[0];
-      if (!file) { showError($("#research-error"), "請選擇排名 CSV 檔"); return; }
-      body.serp_csv = await readFile(file);
-    }
-  } else {
-    Object.assign(body, { scenario: f.get("scenario"), seed: f.get("seed") || null });
+  Object.assign(body, { competitors: lines(f.get("competitors")), keywords: lines(f.get("keywords")),
+    own_site: f.get("own_site") || null, start: f.get("start") || null, end: f.get("end") || null,
+    serp_source: f.get("serp_source") });
+  if (!body.competitors.length || !body.keywords.length) { showError($("#research-error"), "請至少填一個競品網址與一個關鍵字"); return; }
+  if (body.serp_source === "csv") {
+    const file = $("#serp-csv").files[0];
+    if (!file) { showError($("#research-error"), "請選擇排名 CSV 檔"); return; }
+    body.serp_csv = await readFile(file);
   }
-  if (body.llm === "live" && !confirm("真實 Opus 每次研究約 US$0.3，確定要執行嗎？")) return;
+  if (!confirm("這次研究會呼叫真實 Opus（約 US$0.3）並實際抓取競品網站，確定要開始嗎？")) return;
   try {
     const job = await api("/api/research", body);
     watchJob(job.id, true);
@@ -179,8 +147,7 @@ function handleEvent(ev) {
   if (ev.type === "start" || ev.type === "resume") {
     RUN.episode = ev.episode_id;
     $("#run-title").textContent = `Episode ${ev.episode_id}${ev.type === "resume" ? "（續跑）" : ""}`;
-    if (ev.task) $("#run-question").textContent = ev.task.mode === "real"
-      ? `真實網站：${ev.task.competitors.join("、")}｜關鍵字：${(ev.task.keywords || []).join("、")}` : ev.task.question;
+    if (ev.task) $("#run-question").textContent = `競品：${ev.task.competitors.join("、")}｜關鍵字：${(ev.task.keywords || []).join("、")}`;
     if (ev.budget) RUN.budget = ev.budget;
     if (ev.type === "resume") $("#run-result").innerHTML = "";
   } else if (ev.type === "step") {
@@ -296,8 +263,7 @@ function feedbackForm(s) {
       <label>主張 <select name="claim">${s.claims.map((c) => `<option>${esc(c.id)}</option>`).join("")}</select></label>
       <label>判定 <select name="verdict"><option value="wrong">錯誤</option><option value="partial">部分正確</option><option value="correct">正確</option></select></label>
       <label>理由（會被轉成經驗，例如「xxx 的 /tag/ 是自動產生的標籤頁，不是原因，應忽略」）<textarea name="reason" required></textarea></label>
-      <label class="inline"><input type="radio" name="llm" value="fake" checked> 用關鍵字規則轉成經驗（免費）</label>
-      <label class="inline"><input type="radio" name="llm" value="live" ${STATUS.has_key ? "" : "disabled"}> 用真實 LLM 理解理由</label>
+      <label class="inline"><input type="checkbox" name="no_llm"> 不呼叫 LLM：只保存理由原文（不產生程式套用的偏置）</label>
       <button class="primary" type="submit">送出糾正</button>
       <div data-feedback-out></div>
     </form></details>`;
@@ -324,7 +290,7 @@ function bindResult(el, s, live) {
     const f = new FormData(fb);
     const out = $("[data-feedback-out]", fb);
     try {
-      const r = await api("/api/feedback", { episode: s.id, claim: f.get("claim"), verdict: f.get("verdict"), reason: f.get("reason"), llm: f.get("llm") });
+      const r = await api("/api/feedback", { episode: s.id, claim: f.get("claim"), verdict: f.get("verdict"), reason: f.get("reason"), no_llm: f.get("no_llm") === "on" });
       out.innerHTML = `<div class="callout ok"><ul>${r.lines.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>`;
     } catch (err) { out.innerHTML = `<p class="error">${esc(err.message)}</p>`; }
   });
@@ -337,8 +303,8 @@ async function loadEpisodes() {
     + pending.map((a) => `<tr><td><code>${esc(a.id)}</code></td><td>${esc(a.episode)}</td><td><code>${esc(a.rule)}</code></td><td>${esc(a.reason)}</td>`
       + `<td>${esc(a.expires_at)}</td><td><button data-open="${esc(a.episode)}">處理</button></td></tr>`).join("") + "</table>"
     : `<p class="muted">目前沒有待核准的請求。</p>`;
-  $("#episodes-table").innerHTML = `<tr><th>Episode</th><th>情境</th><th>狀態</th><th>結束原因</th><th>結論</th><th>抓取</th><th>LLM</th></tr>`
-    + eps.map((e) => `<tr class="clickable" data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.scenario)}${e.seed ? `（種子 ${e.seed}）` : ""}</td>`
+  $("#episodes-table").innerHTML = `<tr><th>Episode</th><th>網站｜關鍵字</th><th>狀態</th><th>結束原因</th><th>結論</th><th>抓取</th><th>LLM</th></tr>`
+    + eps.map((e) => `<tr class="clickable" data-open="${esc(e.id)}"><td>${esc(e.id)}</td><td>${esc(e.label)}</td>`
       + `<td>${pill(e.status)}</td><td>${esc(e.end_reason || "—")}</td><td>${esc(e.claims.join("、") || "—")}</td><td>${e.fetches}</td>`
       + `<td>${money(e.llm_usd)}</td></tr>`).join("");
   $$("[data-open]").forEach((x) => x.addEventListener("click", () => openEpisode(x.dataset.open)));
@@ -369,8 +335,8 @@ async function loadMemory() {
       + `<td>${esc(SOURCE_ZH[x.source])}</td><td>${x.support}</td><td>${x.applied} / ${x.applied_success}</td><td>${x.conflicts}</td><td>${esc(x.lesson)}`
       + `${x.retired_reason ? `<div class="muted">淘汰原因：${esc(x.retired_reason)}</div>` : ""}</td><td>${esc(x.biases_text.join("；") || "僅文字")}</td>`
       + `<td>${x.status !== "retired" ? `<button class="danger" data-retire="${esc(x.id)}">淘汰</button>` : ""}</td></tr>`).join("") + "</table>"
-    : `<p class="muted">還沒有經驗。同一情境多跑幾次，Agent 會從成功與失敗中萃取經驗（需要 2 次支持才生效）。</p>`;
-  const outcomes = m.outcomes.length ? `<table><tr><th>Episode</th><th>情境</th><th>成功</th><th>人工糾偏</th><th>抓取</th><th>LLM</th><th>套用經驗</th></tr>`
+    : `<p class="muted">還沒有經驗。多做幾次研究，Agent 會從成功與失敗中萃取經驗（需要 2 次支持才生效），你的糾正會立即生效。</p>`;
+  const outcomes = m.outcomes.length ? `<table><tr><th>Episode</th><th>網站｜關鍵字</th><th>成功</th><th>人工糾偏</th><th>抓取</th><th>LLM</th><th>套用經驗</th></tr>`
     + m.outcomes.map((o) => `<tr><td>${esc(o.episode_id)}</td><td>${esc(o.scenario)}</td><td>${o.success ? "✓" : "✗"}</td><td>${o.corrected ? "是" : ""}</td>`
       + `<td>${o.fetches}</td><td>${money(o.llm_usd)}</td><td>${esc(JSON.parse(o.lessons_json || "[]").join("、"))}</td></tr>`).join("") + "</table>" : "";
   const stats = m.stats.length ? `<table><tr><th>層級</th><th>鍵</th><th>命中</th><th>未命中</th><th>價值</th></tr>`
@@ -394,87 +360,7 @@ async function loadMemory() {
 }
 $("#memory-form").addEventListener("submit", (e) => { e.preventDefault(); loadMemory(); });
 
-// ---------- 評測 ----------
-$$('#eval-form input[name="llm"]').forEach((r) => r.addEventListener("change", () => {
-  $("#max-usd-label").hidden = new FormData($("#eval-form")).get("llm") !== "live";
-}));
-async function loadEvalList() {
-  const items = await api("/api/evals");
-  $("#eval-list").innerHTML = items.filter((x) => x.has_report).map((x) => `<li><a href="#" data-report="${esc(x.name)}">${esc(x.name)}</a></li>`).join("")
-    || `<li class="muted">還沒有評測紀錄。</li>`;
-  $$("[data-report]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); showReport(a.dataset.report); }));
-}
-async function showReport(name) {
-  const r = await api(`/api/evals/${encodeURIComponent(name)}`);
-  $("#eval-report").innerHTML = markdown(r.markdown);
-}
-$("#eval-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const f = new FormData(e.target);
-  const body = { llm: f.get("llm"), seeds: f.get("seeds"), test_offset: f.get("test_offset"), quick: f.get("quick") === "on", max_usd: f.get("max_usd") || null };
-  if (body.llm === "live" && !confirm(`真實 LLM 評測會花費最多 US$${body.max_usd}，確定要執行嗎？`)) return;
-  showError($("#eval-error"), null);
-  try {
-    const job = await api("/api/eval", body);
-    const log = $("#eval-log");
-    log.hidden = false; log.textContent = ""; $("#eval-report").innerHTML = `<p class="muted">評測進行中…</p>`;
-    let since = 0;
-    const tick = async () => {
-      const d = await api(`/api/jobs/${job.id}?since=${since}`);
-      since += d.events.length;
-      for (const ev of d.events) {
-        if (ev.type === "log") { log.textContent += `${ev.message}\n`; log.scrollTop = log.scrollHeight; }
-        if (ev.type === "finished") {
-          if (ev.report) { showReport(ev.report); loadEvalList(); } else showError($("#eval-error"), ev.error || "評測失敗");
-          refreshStatus();
-          return;
-        }
-      }
-      setTimeout(tick, 600);
-    };
-    tick();
-  } catch (err) { showError($("#eval-error"), err); }
-});
-
-// ---------- 極簡 Markdown（評測報告用） ----------
-function inline(t) {
-  return esc(t).replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
-    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, a, href) => (/^(https?:|\/|#|\.)/.test(href) ? `<a href="${href}">${a}</a>` : a));
-}
-function markdown(src) {
-  const lines = src.split(/\r?\n/);
-  const out = [];
-  let i = 0;
-  while (i < lines.length) {
-    const l = lines[i];
-    if (/^#{1,4} /.test(l)) { const n = l.match(/^#+/)[0].length; out.push(`<h${n}>${inline(l.slice(n + 1))}</h${n}>`); i++; continue; }
-    if (l.startsWith("|")) {
-      const rows = [];
-      while (i < lines.length && lines[i].startsWith("|")) { rows.push(lines[i]); i++; }
-      const cells = (r) => r.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-      const body = rows.filter((r, k) => !(k === 1 && /^\|[\s:|-]+\|$/.test(r)));
-      out.push(`<div class="table-wrap"><table>${body.map((r, k) => `<tr>${cells(r).map((c) => (k === 0 ? `<th>${inline(c)}</th>` : `<td>${inline(c)}</td>`)).join("")}</tr>`).join("")}</table></div>`);
-      continue;
-    }
-    if (/^[-*] /.test(l)) {
-      const items = [];
-      while (i < lines.length && /^[-*] /.test(lines[i])) { items.push(`<li>${inline(lines[i].slice(2))}</li>`); i++; }
-      out.push(`<ul>${items.join("")}</ul>`); continue;
-    }
-    if (/^\d+\. /.test(l)) {
-      const items = [];
-      while (i < lines.length && /^\d+\. /.test(lines[i])) { items.push(`<li>${inline(lines[i].replace(/^\d+\. /, ""))}</li>`); i++; }
-      out.push(`<ol>${items.join("")}</ol>`); continue;
-    }
-    if (l.startsWith(">")) { out.push(`<blockquote>${inline(l.replace(/^>\s?/, ""))}</blockquote>`); i++; continue; }
-    if (l.trim()) out.push(`<p>${inline(l)}</p>`);
-    i++;
-  }
-  return out.join("\n");
-}
-
 // ---------- 啟動 ----------
-updateMode();
-loadScenarios().catch((e) => showError($("#research-error"), e));
+updateSerpHint();
 refreshStatus();
 setInterval(refreshStatus, 5000);

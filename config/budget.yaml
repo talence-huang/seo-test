@@ -4,7 +4,7 @@ max_fetches: 300              # 對網站的 HTTP 請求（含 robots、sitemap�
 max_fetches_per_domain: 150
 max_api_calls: 200            # 排名 / 歷史快照 API 呼叫
 max_llm_usd: 2.00
-max_wall_time_s: 1200         # 以環境時鐘計（SimWeb 為虛擬時鐘）
+max_wall_time_s: 1200         # 以實際時間計（含抓取間隔與 LLM 回應時間）
 max_actions: 300              # 工具行動數；迴圈另有 10 倍的步驟數安全上限
 
 phases:            # 抓取額度的階段預留（累進制：前面沒用完的額度順延到後面）

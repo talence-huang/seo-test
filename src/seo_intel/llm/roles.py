@@ -23,18 +23,14 @@ PLANNER_SYSTEM = """You are the planning module of an SEO competitive-intelligen
 The agent's own program executes every tool call; you only define the research goal and the information needs.
 Your outputs are parsed by code and every decision you make is logged for a human to inspect.
 
-Data the program can obtain:
-1. Rank data: daily average position per search query for any of the task's sites (like Google Search Console),
-   and top-10 SERP snapshots for a query on a given date.
-2. The sites themselves: robots.txt, XML sitemaps (URLs + lastmod dates) and page HTML
-   (title, headings, word count, structured-data types, FAQ items, tables, publish/modified dates, links).
-3. Historical snapshots of pages (like the Wayback Machine), to compare a page before and after a date.
+Data the program can obtain (live websites; there is no ranking history):
+1. The competitor sites themselves: robots.txt, XML sitemaps (URLs + lastmod dates) and page HTML
+   (title, headings, word or character count, structured-data types, FAQ items, tables, publish/modified dates, links).
+2. Historical snapshots of pages from the Wayback Machine, to compare a page before and after a date.
+3. Current search results for the task's keywords, only when the task's available_data says so.
 
 Information need kinds you may request:
-- rank_change: how target_domains' rankings on the topic's queries changed within the window, and when it began.
-- control_check: whether the own site's rankings on unrelated queries changed in the same period
-  (rules out sitewide causes such as algorithm updates or technical problems).
-- serp_competitors: which domains gained positions on the topic's queries.
+- serp_competitors: which domains and which pages currently rank for the keywords (only if search results are available).
 - site_inventory: which page templates target_domains have, how many pages, and which were recently modified.
 - page_changes: what changed on target_domains' topic pages during the window (content, structure,
   structured data, new pages).
@@ -58,7 +54,7 @@ class GoalOut(BaseModel):
 
 
 class NeedOut(BaseModel):
-    kind: Literal["rank_change", "control_check", "serp_competitors", "site_inventory", "page_changes"]
+    kind: Literal["serp_competitors", "site_inventory", "page_changes"]
     question: str
     target_domains: list[str]
     answer_criteria: str
@@ -110,8 +106,7 @@ REFLECTOR_SYSTEM = """You turn a human analyst's correction of a research claim 
 competitive-intelligence research agent. The lesson will be shown to future episodes and may bias their behaviour.
 Write trigger and lesson in Traditional Chinese (Taiwan). Biases must use the fixed vocabulary:
 - avoid_path: skip URLs whose path starts with `path` (form /segment/) on `domain` ("*" = any site)
-- info_need_priority: set information need `kind` (rank_change, control_check, serp_competitors, site_inventory,
-  page_changes) to `priority` 1-5 (1 = highest)
+- info_need_priority: set information need `kind` (serp_competitors, site_inventory, page_changes) to `priority` 1-5 (1 = highest)
 - hypothesis_prior: shift the prior of hypothesis `category` (competitor_content_change, competitor_new_pages,
   sitewide_factor, own_site_change, other) by `delta` within +-0.2
 - sampling_focus / skip_costly_probes: only if the correction explicitly asks for that behaviour (threshold 0.85-0.99)
@@ -156,7 +151,7 @@ class HypothesesOut(BaseModel):
 
 class ProbeRequest(BaseModel):
     hypothesis_id: str
-    probe: Literal["competitor_rank_gain", "template_change_sample"]
+    probe: Literal["template_change_sample"]
     rationale: str
 
 
@@ -242,11 +237,11 @@ def task_json(task: TaskInput) -> str:
         "analysis_period_hint": [d.isoformat() for d in task.period_hint] if task.period_hint else None,
         "site_language": task.site_language,
     }
-    if task.mode == "real":   # 真實網站：告訴 LLM 哪些資料拿得到、哪些拿不到，避免規劃不存在的資料
-        data |= {"keywords": task.keywords, "environment": "live websites",
-                 "available_data": ["robots.txt and sitemaps", "live pages", "Wayback Machine snapshots"]
-                 + (["current search results for the keywords"] if task.serp_source in ("serpapi", "csv") else []),
-                 "unavailable_data": ["ranking history over time", "non-topic control queries"]}
+    # 告訴 LLM 哪些資料拿得到、哪些拿不到，避免規劃不存在的資料
+    data |= {"keywords": task.keywords, "environment": "live websites",
+             "available_data": ["robots.txt and sitemaps", "live pages", "Wayback Machine snapshots"]
+             + (["current search results for the keywords"] if task.serp_source in ("serpapi", "csv") else []),
+             "unavailable_data": ["ranking history over time", "non-topic control queries"]}
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 

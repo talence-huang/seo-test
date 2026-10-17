@@ -1,5 +1,7 @@
 # 03 — 實作計畫（研究版）
 
+> **2026-10-17 更新**：模擬世界 SimWeb、確定性的假 LLM（FakeLLM）與評測工具已從專案移除，產品只保留研究真實網站的功能。本文件記錄的是研究期間的設計與成果，相關程式與數據保留在 git 標籤 `research-final`（`git checkout research-final` 可取回）。
+
 > 範疇見 [02 §2](02-seo-intel-agent-design.md)。範疇外的想法一律記入 `docs/07-research-findings.md` 的「未來工作」，不加入實作。
 > 順序原則：先建研究環境（SimWeb），再建迴圈——每個功能寫完都能立刻在有標準答案的環境中觀察與驗證。
 

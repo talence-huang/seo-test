@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=1.15",
-    "httpx>=0.28",        # SimWeb 傳輸層與抓取工具；SDK 本身使用 httpx2
+    "httpx>=0.28",        # 網站抓取、Wayback 與 SerpApi；SDK 本身使用 httpx2
     "pydantic>=2.14",
     "pyyaml>=6.0",
     "typer>=0.27",

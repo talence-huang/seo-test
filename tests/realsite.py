@@ -47,7 +47,7 @@ def handler(log: list[str]):
         host, path = u.host, u.path
         if host == SITE:
             if path == "/robots.txt":
-                return httpx.Response(200, text=f"User-agent: *\nDisallow: /cart\nSitemap: https://{SITE}/sitemap_index.xml\n")
+                return httpx.Response(200, text=f"User-agent: *\nDisallow: /cart\nDisallow: /private\nSitemap: https://{SITE}/sitemap_index.xml\n")
             if path == "/sitemap_index.xml":
                 return httpx.Response(200, text=f"<sitemapindex><sitemap><loc>https://{SITE}/post-sitemap.xml</loc></sitemap>"
                                                 f"<sitemap><loc>https://{SITE}/tag-sitemap.xml</loc></sitemap></sitemapindex>")

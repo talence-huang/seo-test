@@ -1,4 +1,4 @@
-"""在 SimWeb 情境中執行一個 episode：CLI 與評測共用同一份流程。"""
+"""建立、執行與續跑研究 episode：CLI 與網頁介面共用同一份流程。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from seo_intel.config import PROJECT_ROOT, Settings
 from seo_intel.core.context import EpisodeContext
 from seo_intel.core.episode import RUNS_DIR, build_context, load_checkpoint, new_state
 from seo_intel.core.loop import ResearchLoop, StepHook
-from seo_intel.core.models import EpisodeState, TaskInput
+from seo_intel.core.models import EpisodeState
 from seo_intel.llm.types import LLMClient
 from seo_intel.memory.session import MemorySession
 from seo_intel.memory.store import MemoryStore
@@ -25,14 +25,7 @@ DEFAULT_MEMORY = PROJECT_ROOT / "data" / "memory.db"
 class RunResult:
     state: EpisodeState
     ctx: EpisodeContext
-    sim: object
     paused: bool
-
-
-def scenario_task(sim) -> TaskInput:
-    g = sim.spec.goal
-    return TaskInput(scenario=sim.spec.id, question=g.question, own_site=g.own_site, competitors=list(g.competitors),
-                     today=sim.spec.now, period_hint=g.window)
 
 
 def open_memory(path: Path | None, ablate: frozenset[str] = frozenset()) -> MemorySession | None:
@@ -68,47 +61,19 @@ def apply_run_config(settings: Settings, cfg: dict) -> tuple[Settings, MemorySes
     return settings, open_memory(path, frozenset(mem.get("ablate", [])))
 
 
-def write_artifacts(ctx: EpisodeContext, sim=None) -> dict:
-    """sim=None：真實網站，沒有伺服器端的違規判定，只記錄 Agent 自己的請求統計。"""
+def write_artifacts(ctx: EpisodeContext) -> dict:
+    """environment.json（請求統計）與 timeline.html。真實網站沒有環境端的違規判定，只記錄 Agent 自己的請求。"""
     from seo_intel.observe.timeline import render_timeline
     from seo_intel.observe.trace import read_trace
 
-    if sim is not None:
-        log = sim.server.log
-        env = {"violations": log.violations(), "flags": dict(log.flag_counts()), "requests_by_host": dict(log.by_host())}
-    else:
-        env = {"mode": "real", "requests_by_host": dict(ctx.http.host_counts),
-               "status_counts": {str(k): v for k, v in ctx.http.status_counts.items()},
-               "note": "真實網站沒有環境端的違規判定；robots.txt、抓取間隔與 crawl-delay 由 Agent 端的 PolicyGate 與工具層強制"}
+    env = {"requests_by_host": dict(ctx.http.host_counts),
+           "status_counts": {str(k): v for k, v in ctx.http.status_counts.items()},
+           "note": "robots.txt、抓取間隔與 crawl-delay 由 Agent 端的 PolicyGate 與工具層強制"}
     (ctx.run_dir / "environment.json").write_text(json.dumps(env, ensure_ascii=False, indent=2), encoding="utf-8")
     html = render_timeline(read_trace(ctx.run_dir / "trace.jsonl"), ctx.state.model_dump(mode="json"),
                            ctx.frontier.to_dict() if ctx.frontier else None, env)
     (ctx.run_dir / "timeline.html").write_text(html, encoding="utf-8")
     return env
-
-
-def run_scenario(scenario: str, settings: Settings, llm_factory: Callable[[Path], LLMClient], *,
-                 memory: MemorySession | None = None, run_root: Path = RUNS_DIR,
-                 observers: Callable[[EpisodeContext], list[Observer]] | None = None,
-                 step_hook: StepHook | None = None, artifacts: bool = True, seed: int | None = None) -> RunResult:
-    """seed 覆寫 SimWeb 的世界種子（同樣的因果結構、不同的網址與雜訊），評測用來增加樣本。"""
-    from seo_intel.observe.trace import TraceWriter
-    from simweb import build
-
-    sim = build(scenario, seed=seed)
-    state = new_state(scenario_task(sim), sim.clock)
-    state.world_seed = seed
-    run_dir = run_root / state.id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    ctx = build_context(state, settings, llm_factory(run_dir), sim.client(), sim.clock, run_dir, memory=memory)
-    obs = [TraceWriter(run_dir / "trace.jsonl"), *(observers(ctx) if observers else [])]
-    loop = ResearchLoop(ctx, obs, step_hook=step_hook)
-    try:
-        loop.run()
-    finally:
-        if artifacts:
-            write_artifacts(ctx, sim)
-    return RunResult(state=state, ctx=ctx, sim=sim, paused=loop.paused)
 
 
 def prepare_real(params: dict, settings: Settings, llm_factory: Callable[[Path], LLMClient], *,
@@ -146,24 +111,18 @@ def run_real(params: dict, settings: Settings, llm_factory: Callable[[Path], LLM
     finally:
         if artifacts:
             write_artifacts(ctx)
-    return RunResult(state=ctx.state, ctx=ctx, sim=None, paused=loop.paused)
+    return RunResult(state=ctx.state, ctx=ctx, paused=loop.paused)
 
 
 def resume_context(run_dir: Path, settings: Settings, llm_factory: Callable[[Path], LLMClient],
-                   memory: MemorySession | None = None) -> tuple[EpisodeContext, object | None]:
-    """從檢查點重建研究環境：模擬世界（同一個種子、接續的虛擬時鐘）或真實網站（run.json 的 env 設定）。"""
+                   memory: MemorySession | None = None) -> EpisodeContext:
+    """從檢查點重建研究環境（run.json 的 env 設定：排名來源與 CSV 路徑）。"""
+    from seo_intel.real import env as real
+
     state, frontier = load_checkpoint(run_dir)
-    if state.task.mode == "real":
-        from seo_intel.real import env as real
-
-        env = load_run_config(run_dir).get("env") or {"mode": "real", "serp_source": "none"}
-        return build_context(state, settings, llm_factory(run_dir), real.real_client(), real.RealClock(), run_dir,
-                             frontier, memory=memory, tools=real.tools_factory(env, state.task.today)), None
-    from simweb import VirtualClock, build
-
-    sim = build(state.task.scenario, clock=VirtualClock(start=state.clock_at), seed=state.world_seed)
-    return build_context(state, settings, llm_factory(run_dir), sim.client(), sim.clock, run_dir, frontier,
-                         memory=memory), sim
+    env = load_run_config(run_dir).get("env") or {"serp_source": "none"}
+    return build_context(state, settings, llm_factory(run_dir), real.real_client(), real.RealClock(), run_dir,
+                         frontier, memory=memory, tools=real.tools_factory(env, state.task.today))
 
 
 def resume_run(run_dir: Path, settings: Settings, llm_factory: Callable[[Path], LLMClient], *,
@@ -174,7 +133,7 @@ def resume_run(run_dir: Path, settings: Settings, llm_factory: Callable[[Path], 
     from seo_intel.core import approvals
     from seo_intel.observe.trace import TraceWriter, truncate_trace
 
-    ctx, sim = resume_context(run_dir, settings, llm_factory, memory)
+    ctx = resume_context(run_dir, settings, llm_factory, memory)
     state = ctx.state
     notes = approvals.resume(ctx, now)
     truncate_trace(run_dir / "trace.jsonl", state.seq)
@@ -186,5 +145,5 @@ def resume_run(run_dir: Path, settings: Settings, llm_factory: Callable[[Path], 
         loop.run()
     finally:
         if artifacts:
-            write_artifacts(ctx, sim)
-    return RunResult(state=state, ctx=ctx, sim=sim, paused=loop.paused)
+            write_artifacts(ctx)
+    return RunResult(state=state, ctx=ctx, paused=loop.paused)

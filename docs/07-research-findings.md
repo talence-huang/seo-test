@@ -1,5 +1,7 @@
 # 07 — 研究成果
 
+> **2026-10-17 更新**：模擬世界 SimWeb、確定性的假 LLM（FakeLLM）與評測工具已從專案移除，產品只保留研究真實網站的功能。本文件記錄的是研究期間的設計與成果，相關程式與數據保留在 git 標籤 `research-final`（`git checkout research-final` 可取回）。
+
 > 版本：v1.0（2026-10-17，研究收尾版）。本文件以數據回答 [02](02-seo-intel-agent-design.md) 的三個研究問題，並誠實列出未達標的項目與原因。
 > 各 Phase 的實作細節與完整發現見 [03 實作計畫](03-implementation-plan.md)；評測設計見 [05 §4](05-memory-and-evals.md)。
 

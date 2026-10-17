@@ -163,7 +163,7 @@ def validate_citations(report: dict, st: EpisodeState, claims: list[Claim]) -> t
 
 def render_markdown(st: EpisodeState, claims: list[Claim], report: dict, stats: dict, confounder: str | None) -> str:
     lines = [f"# {report['headline'] or st.goal.restated_question}", "",
-             f"> Episode `{st.id}` · 情境 {st.task.scenario} · 結束原因 `{st.end_reason}`", "",
+             f"> Episode `{st.id}` · {st.task.label} · 結束原因 `{st.end_reason}`", "",
              report["summary"], "", "## 結論（程式由證據推導的結構化主張）", ""]
     if claims:
         lines += ["| 主張 | 網站 | 範本 | 變動類型 | 時間窗 | 信心 | 證據 | 驗證 |", "|---|---|---|---|---|---|---|---|"]

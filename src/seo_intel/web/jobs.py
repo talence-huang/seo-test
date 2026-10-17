@@ -15,37 +15,30 @@ from typing import Any
 
 from seo_intel.config import PROJECT_ROOT, get_settings
 from seo_intel.core import approvals
-from seo_intel.core.episode import RUNS_DIR, build_context, load_checkpoint, new_state, write_checkpoint
+from seo_intel.core.episode import RUNS_DIR, load_checkpoint, write_checkpoint
 from seo_intel.core.loop import ResearchLoop
-from seo_intel.core.runner import (DEFAULT_MEMORY, apply_run_config, load_run_config, save_run_config, scenario_task,
-                                   write_artifacts)
+from seo_intel.core.runner import DEFAULT_MEMORY, apply_run_config, load_run_config, write_artifacts
 from seo_intel.observe.store import DbRecorder
 from seo_intel.observe.trace import TraceWriter, truncate_trace
 from seo_intel.store import Database
 
 DEFAULT_DB = PROJECT_ROOT / "data" / "intel.db"
-REPORTS_DIR = PROJECT_ROOT / "evals" / "reports"
 UPLOADS = PROJECT_ROOT / "data" / "uploads"
 
 
-def make_llm(mode: str, settings, run_dir: Path):
+def make_llm(settings, run_dir: Path):
+    """真實 Opus；每次呼叫錄製到 run 目錄（稽核用）。"""
     from seo_intel.llm import AnthropicLLM, RecordingLLM
-    from seo_intel.llm.fake_planner import fake_llm
 
-    if mode == "fake":
-        return fake_llm(settings.models)
-    if mode == "live":
-        return RecordingLLM(AnthropicLLM(settings.models), run_dir / "llm_cassette.jsonl")
-    raise ValueError(f"未知的 LLM 模式：{mode}")
+    return RecordingLLM(AnthropicLLM(settings.models), run_dir / "llm_cassette.jsonl")
 
 
 @dataclass
 class Job:
     id: str
-    kind: str                                    # research / eval
+    kind: str                                    # research
     status: str = "starting"                     # starting / running / stepping / paused / waiting_approval / done / failed
     episode_id: str | None = None
-    llm: str = "fake"
     step_mode: bool = False
     events: list[dict] = field(default_factory=list)
     error: str | None = None
@@ -64,7 +57,7 @@ class Job:
 
     def info(self) -> dict:
         return {"id": self.id, "kind": self.kind, "status": self.status, "episode_id": self.episode_id,
-                "llm": self.llm, "step_mode": self.step_mode, "error": self.error, "result": self.result,
+                "step_mode": self.step_mode, "error": self.error, "result": self.result,
                 "n_events": len(self.events)}
 
 
@@ -104,36 +97,7 @@ class JobManager:
     # ---------- 研究 ----------
 
     def start_research(self, p: dict) -> Job:
-        if p.get("mode") == "real":
-            return self._start_real(p)
-        from simweb import build
-
-        settings0 = get_settings()
-        seed = int(p["seed"]) if p.get("seed") not in (None, "") else None
-        sim = build(p["scenario"], seed=seed)
-        state = new_state(scenario_task(sim), sim.clock)
-        state.world_seed = seed
-        run_dir = RUNS_DIR / state.id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        mode = p.get("memory") or "default"
-        if mode in ("default", "none"):
-            memory = DEFAULT_MEMORY if mode == "default" else None
-        else:   # 自訂記憶檔：相對路徑以專案根目錄為準
-            memory = Path(mode) if Path(mode).is_absolute() else PROJECT_ROOT / mode
-        budget = {k: (int(p[k]) if k == "max_fetches" else float(p[k])) for k in ("max_fetches", "max_llm_usd")
-                  if p.get(k) not in (None, "")}
-        cfg = save_run_config(run_dir, Path(memory) if memory else None, sorted(p.get("ablate") or []), budget)
-        settings, mem = apply_run_config(settings0, cfg)
-        job = self._new("research", llm=p.get("llm", "fake"), step_mode=bool(p.get("step")))
-        job.episode_id = state.id
-        self.by_episode[state.id] = job
-        ctx = build_context(state, settings, make_llm(job.llm, settings, run_dir), sim.client(), sim.clock, run_dir,
-                            memory=mem)
-        job.emit("start", episode_id=state.id, task=state.task.model_dump(mode="json"),
-                 budget={"max_fetches": ctx.ledger.max_fetches, "max_llm_usd": ctx.ledger.max_llm_usd},
-                 memory=str(mem.store.path) if mem else None)
-        threading.Thread(target=self._run, args=(job, ctx, sim, False, []), daemon=True).start()
-        return job
+        return self._start_real(p)
 
     def _start_real(self, p: dict) -> Job:
         from seo_intel.core.runner import prepare_real
@@ -157,24 +121,23 @@ class JobManager:
         with self._lock:
             if (b := self.busy()) is not None:
                 raise RuntimeError(f"已有工作在執行（{b.kind} {b.episode_id or b.id}），請等它結束或暫停")
-        llm = p.get("llm", "fake")
         try:
-            ctx = prepare_real(params, settings, lambda run_dir: make_llm(llm, settings, run_dir), memory=mem,
+            ctx = prepare_real(params, settings, lambda run_dir: make_llm(settings, run_dir), memory=mem,
                                run_cfg=run_cfg)
         except Exception:
             if mem:
                 mem.store.close()
             raise
-        job = self._new("research", llm=llm, step_mode=bool(p.get("step")))
+        job = self._new("research", step_mode=bool(p.get("step")))
         job.episode_id = ctx.state.id
         self.by_episode[ctx.state.id] = job
         job.emit("start", episode_id=ctx.state.id, task=ctx.state.task.model_dump(mode="json"),
                  budget={"max_fetches": ctx.ledger.max_fetches, "max_llm_usd": ctx.ledger.max_llm_usd},
                  memory=str(mem.store.path) if mem else None)
-        threading.Thread(target=self._run, args=(job, ctx, None, False, []), daemon=True).start()
+        threading.Thread(target=self._run, args=(job, ctx, False, []), daemon=True).start()
         return job
 
-    def resume(self, episode_id: str, llm: str | None = None, step: bool = False) -> Job:
+    def resume(self, episode_id: str, step: bool = False) -> Job:
         from seo_intel.core.runner import resume_context
 
         run_dir = RUNS_DIR / episode_id
@@ -183,8 +146,7 @@ class JobManager:
             raise RuntimeError(f"Episode 已結束（{state.status}）")
         settings, mem = apply_run_config(get_settings(), load_run_config(run_dir))
         prev = self.by_episode.get(episode_id)
-        mode = llm or (prev.llm if prev else "fake")
-        ctx, sim = resume_context(run_dir, settings, lambda d: make_llm(mode, settings, d), mem)
+        ctx = resume_context(run_dir, settings, lambda d: make_llm(settings, d), mem)
         state = ctx.state
         try:
             notes = approvals.resume(ctx)
@@ -195,7 +157,7 @@ class JobManager:
         truncate_trace(run_dir / "trace.jsonl", state.seq)
         job = prev if prev is not None and prev.status not in ("starting", "running", "stepping") else None
         if job is None:
-            job = self._new("research", llm=mode, step_mode=step)
+            job = self._new("research", step_mode=step)
             job.episode_id = episode_id
             self.by_episode[episode_id] = job
         else:
@@ -204,7 +166,7 @@ class JobManager:
                     raise RuntimeError(f"已有工作在執行（{b.kind} {b.episode_id or b.id}）")
                 job.status, job.step_mode, job.pause_requested = "starting", step, False
         job.emit("resume", episode_id=episode_id, notes=notes)
-        threading.Thread(target=self._run, args=(job, ctx, sim, True, notes), daemon=True).start()
+        threading.Thread(target=self._run, args=(job, ctx, True, notes), daemon=True).start()
         return job
 
     def _hook(self, job: Job):
@@ -222,7 +184,7 @@ class JobManager:
             return not job.pause_requested
         return hook
 
-    def _run(self, job: Job, ctx, sim, resumed: bool, notes: list[str]) -> None:
+    def _run(self, job: Job, ctx, resumed: bool, notes: list[str]) -> None:
         st = ctx.state
         db = Database(self.db_path)
         final = "failed"
@@ -242,7 +204,7 @@ class JobManager:
             final, job.error = "failed", f"{type(e).__name__}: {e}"
             job.emit("error", message=job.error, trace=traceback.format_exc()[-2000:])
         finally:
-            for cleanup in (db.close, lambda: write_artifacts(ctx, sim),
+            for cleanup in (db.close, lambda: write_artifacts(ctx),
                             lambda: ctx.memory.store.close() if ctx.memory else None):
                 try:
                     cleanup()
@@ -286,52 +248,6 @@ class JobManager:
             out["job"] = self.resume(episode_id, step=prev.step_mode if prev else False).info()
         return out
 
-    # ---------- 評測 ----------
-
-    def start_eval(self, p: dict) -> Job:
-        from datetime import datetime
-
-        from seo_intel.evals.report import render
-        from seo_intel.evals.runner import BudgetExceeded, EvalConfig, protocol, save, splits
-
-        llm = p.get("llm", "fake")
-        if llm == "live" and not p.get("max_usd"):
-            raise ValueError("真實 LLM 評測必須設定花費上限（max_usd）")
-        quick = bool(p.get("quick"))
-        out = REPORTS_DIR / f"{datetime.now():%Y%m%d-%H%M%S}-{llm}"
-        job = self._new("eval", llm=llm)
-        settings = get_settings()
-        cfg = EvalConfig(out_dir=out, seeds=int(p.get("seeds") or 3), test_offset=int(p.get("test_offset") or 0),
-                         max_usd=float(p["max_usd"]) if p.get("max_usd") else None,
-                         ablations=() if quick else ("M1", "M2"), tight_budgets=() if quick else (20, 30),
-                         progress=lambda m: job.emit("log", message=m))
-
-        def work() -> None:
-            import json
-
-            job.status = "running"
-            try:
-                reflector = make_llm(llm, settings, out)
-                ev = protocol(settings, lambda run_dir: make_llm(llm, settings, run_dir), cfg, reflector)
-                sp = splits()
-                meta = {"name": out.name, "llm": llm, "seeds": cfg.seeds, "test_offset": cfg.test_offset,
-                        "on_approval": cfg.on_approval, "test": [x for x, _ in sp["test"]],
-                        "train": [x for x, _ in sp["train"]]}
-                path = save(ev, cfg, meta)
-                (out / "report.md").write_text(render(json.loads(path.read_text(encoding="utf-8")), out),
-                                               encoding="utf-8")
-                job.result = {"report": out.name}
-                job.status = "done"
-            except BudgetExceeded as e:
-                job.status, job.error = "failed", str(e)
-            except Exception as e:   # noqa: BLE001
-                job.status, job.error = "failed", f"{type(e).__name__}: {e}"
-                job.emit("error", message=job.error, trace=traceback.format_exc()[-2000:])
-            job.emit("finished", status=job.status, report=job.result.get("report"), error=job.error)
-
-        threading.Thread(target=work, daemon=True).start()
-        return job
-
 
 def episode_summary(run_dir: Path) -> dict:
     """前端用的 episode 摘要：結論、假設、報告、核准、限制、學到什麼。"""
@@ -341,7 +257,7 @@ def episode_summary(run_dir: Path) -> dict:
     pa = st.pending_approval
     rep = st.report or {}
     return {
-        "id": st.id, "scenario": st.task.scenario, "seed": st.world_seed, "question": st.task.question,
+        "id": st.id, "label": st.task.label, "question": st.task.question, "keywords": st.task.keywords,
         "status": st.status, "end_reason": st.end_reason, "phase": st.phase, "seq": st.seq,
         "budget": st.budget.model_dump(), "goal": st.goal.model_dump(mode="json") if st.goal else None,
         "claims": [c.model_dump(mode="json") for c in st.claims],

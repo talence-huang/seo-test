@@ -75,12 +75,12 @@ def build_task(p: dict, client: httpx.Client | None = None, today: date | None =
                 + "相關的頁面做了什麼內容策略？哪些頁面範本與內容變化可能讓它們在這些關鍵字上取得排名？")
     return TaskInput(question=question, own_site=own, competitors=list(dict.fromkeys(competitors)), today=today,
                      period_hint=(start, end), site_language="zh-tw" if any(_CJK.search(k) for k in keywords) else "en",
-                     mode="real", keywords=keywords, serp_source=p.get("serp_source") or "none")
+                     keywords=keywords, serp_source=p.get("serp_source") or "none")
 
 
 def env_config(p: dict, csv_path: Path | None = None) -> dict:
     """存進 run.json 的環境設定（不含金鑰）。"""
-    return {"mode": "real", "serp_source": p.get("serp_source") or "none",
+    return {"serp_source": p.get("serp_source") or "none",
             "csv_path": str(csv_path) if csv_path else None}
 
 

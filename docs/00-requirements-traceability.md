@@ -1,5 +1,7 @@
 # 00 — 需求對照表
 
+> **2026-10-17 更新**：模擬世界 SimWeb、確定性的假 LLM（FakeLLM）與評測工具已從專案移除，產品只保留研究真實網站的功能。本文件記錄的是研究期間的設計與成果，相關程式與數據保留在 git 標籤 `research-final`（`git checkout research-final` 可取回）。
+
 > 逐條對應：需求 → 設計 → 程式模組 → 如何觀察 / 驗證。狀態：⬜ 未開始 / 🔄 進行中 / ✅ 完成並驗證。
 
 ## A. Autonomous Research Loop

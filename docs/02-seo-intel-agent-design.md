@@ -1,5 +1,7 @@
 # 02 — 研究總覽與範疇
 
+> **2026-10-17 更新**：模擬世界 SimWeb、確定性的假 LLM（FakeLLM）與評測工具已從專案移除，產品只保留研究真實網站的功能。本文件記錄的是研究期間的設計與成果，相關程式與數據保留在 git 標籤 `research-final`（`git checkout research-final` 可取回）。
+
 > 版本：v0.4（2026-10-17）——研究版，範疇收斂
 > 詳細設計：[04 研究迴圈與可觀察性](04-research-loop.md)、[05 學習機制與 Evals](05-memory-and-evals.md)、[06 失效模式與自治邊界](06-reliability-and-autonomy.md)
 > 實作計畫：[03](03-implementation-plan.md)；需求對照：[00](00-requirements-traceability.md)；背景研究：[01 Hermes](01-hermes-architecture.md)

@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from datetime import date
 
 from seo_intel.core.context import EpisodeContext
 from seo_intel.core.frontier import template_key
@@ -27,30 +26,20 @@ class ProbeSpec:
 
 
 CATALOG: dict[str, ProbeSpec] = {
-    "control_vs_topic": ProbeSpec(
-        "對照組比較", "免費", COMPETITOR | {"sitewide_factor", "own_site_change"},
-        "比較自家站主題查詢與非主題查詢的排名變化；兩者相近代表全站性因素，只有主題下滑代表主題層級原因。"),
     "serp_template_share": ProbeSpec(
         "SERP 排名網址範本", "免費", COMPETITOR,
         "競品在主題查詢 SERP 中的排名網址，有多少比例屬於假設中的範本；競品若不是 SERP 上升者則反對。"),
     "template_burst": ProbeSpec(
         "範本更新爆發度", "免費", COMPETITOR,
         "範本在期間內的更新比例，相對於全站平常的更新比例；接近平常水準代表背景變動而非策略改變。"),
-    "timing_alignment": ProbeSpec(
-        "時序吻合", "免費", COMPETITOR | {"own_site_change"},
-        "範本變動的中位日期與排名變化起始日的先後；變動晚於排名變化就不可能是原因。"),
-    "competitor_rank_gain": ProbeSpec(
-        "競品排名變化", "API 約 9 次", COMPETITOR,
-        "競品在主題查詢上的排名是否在同期明顯進步。"),
     "template_change_sample": ProbeSpec(
         "範本變動抽樣", "抓取最多 4 次 + 歷史快照", COMPETITOR | {"own_site_change"},
         "在假設範本中擴大抽樣並比對歷史版本，計算確實變動的頁面比例。"),
 }
-FREE = ("control_vs_topic", "serp_template_share", "template_burst", "timing_alignment")
-COSTLY = ("competitor_rank_gain", "template_change_sample")
+FREE = ("serp_template_share", "template_burst")   # 排名歷史類的探針（對照組、時序、競品排名變化）需要逐日排名，真實網站拿不到
+COSTLY = ("template_change_sample",)
 SAMPLE_FETCHES = 6
 STRATEGIC_RATE = 0.3      # 「策略性改版」至少應涉及範本中約 30% 的主題頁
-TIMING_COVERAGE = 0.5        # 時序反證需要看過期間內至少一半的變動頁
 
 
 @dataclass
@@ -107,17 +96,17 @@ def _random_sample(ctx: EpisodeContext, tkey: str, k: int) -> list[str]:
     return sorted(pool, key=lambda u: hashlib.blake2b(u.encode(), digest_size=8).digest())[:k]
 
 
-def applicable(kind: str, h: Hypothesis, goal_type: str) -> bool:
+def applicable(kind: str, h: Hypothesis, serp_source: str) -> bool:
     if h.category not in CATALOG[kind].applies:
         return False
-    if kind == "control_vs_topic" and goal_type != "ranking_drop_cause":
+    if kind == "serp_template_share" and serp_source == "none":   # 沒有設定排名資料來源
         return False
     return True
 
 
 def plan(ctx: EpisodeContext, kind: str, hyps: list[Hypothesis], requested_by: str, rationale: str = "") -> Probe | None:
     st = ctx.state
-    hyps = [h for h in hyps if applicable(kind, h, st.goal.goal_type)]
+    hyps = [h for h in hyps if applicable(kind, h, st.task.serp_source)]
     covered = {hid for p in st.probes if p.kind == kind for hid in p.hypothesis_ids}
     hyps = [h for h in hyps if h.id not in covered]
     if not hyps:
@@ -125,23 +114,13 @@ def plan(ctx: EpisodeContext, kind: str, hyps: list[Hypothesis], requested_by: s
     probe = Probe(id=f"P{len(st.probes) + 1}", kind=kind, hypothesis_ids=[h.id for h in hyps],
                   requested_by=requested_by, rationale=rationale)
     st.probes.append(probe)
-    own = st.task.own_site
-    if kind == "control_vs_topic":
-        if not _latest(ctx, "rank_change", site=own):
-            _enqueue(ctx, probe, "rank_scan", {"site": own, "scope": "topic"}, "需要自家站主題排名")
-        if not _latest(ctx, "rank_control", site=own):
-            _enqueue(ctx, probe, "rank_scan", {"site": own, "scope": "control"}, "需要對照組排名")
-    elif kind == "serp_template_share":
+    if kind == "serp_template_share":
         if not _latest(ctx, "serp_shift"):
-            _enqueue(ctx, probe, "serp_scan", {"need": "probe"}, "需要事件前後的 SERP")
+            _enqueue(ctx, probe, "serp_scan", {"need": "probe"}, "需要這些關鍵字目前的 SERP")
     elif kind == "template_burst":
         for site in {h.subject_site for h in hyps}:
             if not _latest(ctx, "site_inventory", domain=site):
                 _enqueue(ctx, probe, "discover", {"domain": site}, f"需要 {site} 的範本清單")
-    elif kind == "competitor_rank_gain":
-        for site in {h.subject_site for h in hyps}:
-            if not _latest(ctx, "rank_change", site=site):
-                _enqueue(ctx, probe, "rank_scan", {"site": site, "scope": "topic"}, f"需要 {site} 的主題排名")
     elif kind == "template_change_sample":
         for h in hyps:
             # 比例估計必須用隨機樣本：frontier 偏好「最近更新」的頁面，用它來選樣會系統性高估變動率
@@ -184,36 +163,6 @@ def drop_action(ctx: EpisodeContext, action: Action, why: str) -> None:
 
 
 # ---------- 判定規則 ----------
-
-def _onset(ctx: EpisodeContext, site: str) -> date | None:
-    o = _latest(ctx, "rank_change", site=site)
-    raw = o.data["aggregate"].get("onset_median") if o else None
-    return date.fromisoformat(raw) if raw else None
-
-
-def _control(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
-    own = ctx.state.task.own_site
-    topic, control = _latest(ctx, "rank_change", site=own), _latest(ctx, "rank_control", site=own)
-    if not topic or not control or not topic.data["aggregate"].get("n_queries"):
-        return []
-    t, c = topic.data["aggregate"]["mean_delta"], control.data["aggregate"]["mean_delta"]
-    if t < 1.0:
-        return []
-    ratio = c / t
-    ids = [topic.id, control.id]
-    note = f"主題查詢 {t:+.1f}、對照組 {c:+.1f}（比例 {ratio:.2f}）"
-    if h.category == "sitewide_factor":
-        if ratio >= 0.7:
-            return [Draft(h.id, "for", "strong", ids, note + "：全站一起下滑")]
-        if ratio <= 0.4:
-            return [Draft(h.id, "against", "strong", ids, note + "：下滑集中在主題查詢")]
-        return [Draft(h.id, "for", "weak", ids, note + "：部分為全站性")]
-    if ratio <= 0.4:   # 只能證明是主題層級原因，無法區分是哪個範本 → 弱支持
-        return [Draft(h.id, "for", "weak", ids, note + "：下滑集中在主題查詢")]
-    if ratio >= 0.7:
-        return [Draft(h.id, "against", "strong", ids, note + "：全站一起下滑，主題層級原因不足以解釋")]
-    return []
-
 
 def _serp_share(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
     serp = _latest(ctx, "serp_shift")
@@ -260,74 +209,6 @@ def _burst(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
     return []
 
 
-def _timing(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
-    st = ctx.state
-    target = st.task.own_site if st.goal.goal_type == "ranking_drop_cause" else h.subject_site
-    onset = _onset(ctx, target) or _onset(ctx, st.task.own_site)
-    urls = st.template_changes.get(h.template or "", [])
-    dates = []
-    for u in urls:
-        info = st.fetched.get(u, {})
-        raw = info.get("published") if info.get("change") == "new" else info.get("modified")
-        if raw:
-            dates.append(date.fromisoformat(raw[:10]))
-    if not onset or not dates:
-        return []
-    # 用「最早」的變動日，而非中位數：漸進式上線時，前幾頁就足以開始影響排名；
-    # 且觀察到的最早日期只是真實最早日期的上限（我們只看到樣本）。
-    first = min(dates)
-    lag = (onset - first).days
-    ids = _page_obs_ids(ctx, urls)[:5] + [o.id for o in st.observations if o.kind == "rank_change"][:1]
-    note = f"最早觀察到的變動 {first}（共 {len(dates)} 頁），排名變化起始 {onset}，相差 {lag} 天"
-    if -3 <= lag <= 45:
-        return [Draft(h.id, "for", "moderate", ids, note + "：變動先於排名變化")]
-    if lag < -7:
-        # 觀察到的最早日期只是上限：只有看過該範本大部分期間內的變動頁，才足以強烈否證（Phase 6 評測發現：
-        # 抓得少時最早日期偏晚，會把真正的原因誤判為「晚於排名變化」）
-        stat = ctx.frontier.templates.get(h.template or "") if ctx.frontier else None
-        n_recent = stat.n_recent if stat else 0
-        coverage = len(dates) / n_recent if n_recent else 0.0
-        strength = "strong" if coverage >= TIMING_COVERAGE else "weak"
-        return [Draft(h.id, "against", strength, ids,
-                      note + f"：觀察到的最早變動晚於排名變化（已看過期間內更新的 {len(dates)} / {n_recent} 頁"
-                      + ("，不可能是原因）" if strength == "strong" else "，樣本不足以排除更早的變動）"))]
-    if lag > 60:
-        return [Draft(h.id, "against", "weak", ids, note + "：變動遠早於排名變化")]
-    return []
-
-
-def _rank_gain(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
-    o = _latest(ctx, "rank_change", site=h.subject_site)
-    if not o or not o.data["aggregate"].get("n_queries"):
-        return []
-    d = o.data["aggregate"]["mean_delta"]
-    note = f"{h.subject_site} 主題查詢平均排名變化 {d:+.1f}（負值＝進步）"
-    if d <= -1.5:
-        return [Draft(h.id, "for", "moderate", [o.id], note)]
-    if d > -0.5:
-        return [Draft(h.id, "against", "moderate", [o.id], note + "：同期沒有進步")]
-    return []
-
-
-def _site_base_rate(ctx: EpisodeContext, site: str) -> float | None:
-    inv = _latest(ctx, "site_inventory", domain=site)
-    if not inv:
-        return None
-    rows = inv.data["templates"]
-    return sum(r["n_recent"] for r in rows) / max(1, sum(r["n_urls"] for r in rows))
-
-
-def _page_state(info: dict | None) -> str:
-    """changed / unchanged / unknown。沒有快照、無法判定的頁面不能算進分母。"""
-    if not info or info.get("status") != 200:
-        return "unknown"
-    if info.get("change"):
-        return "changed"
-    if not info.get("evidence"):
-        return "unchanged"           # 修改與發布日期都不在期間內
-    return "unchanged" if info.get("diff_status") == "ok" else "unknown"
-
-
 def _sample(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
     probe = next((p for p in ctx.state.probes if p.kind == "template_change_sample" and h.id in p.hypothesis_ids), None)
     urls = [u for u in (probe.sample if probe else []) if u.startswith(f"https://{h.subject_site}/")]
@@ -354,8 +235,7 @@ def _sample(ctx: EpisodeContext, h: Hypothesis) -> list[Draft]:
                                                     f"低於 {STRATEGIC_RATE:.0%} p={p_below_strategy:.2f}），不計入證據")]
 
 
-_EVAL = {"control_vs_topic": _control, "serp_template_share": _serp_share, "template_burst": _burst,
-         "timing_alignment": _timing, "competitor_rank_gain": _rank_gain, "template_change_sample": _sample}
+_EVAL = {"serp_template_share": _serp_share, "template_burst": _burst, "template_change_sample": _sample}
 
 
 def evaluate(ctx: EpisodeContext, probe: Probe) -> list[Draft]:

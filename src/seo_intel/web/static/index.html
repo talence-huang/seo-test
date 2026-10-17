@@ -14,7 +14,6 @@
     <button data-tab="research" class="active">研究</button>
     <button data-tab="episodes">紀錄與核准 <span class="badge" id="pending-badge" hidden></span></button>
     <button data-tab="memory">記憶</button>
-    <button data-tab="eval">評測</button>
   </nav>
   <div class="statusline" id="statusline"></div>
 </header>
@@ -24,69 +23,50 @@
   <section id="tab-research" class="tab">
     <div class="layout">
       <form id="research-form" class="card form">
-        <h2>開始一次研究</h2>
-        <div class="segmented" role="radiogroup">
-          <label><input type="radio" name="mode" value="real" checked> 真實網站</label>
-          <label><input type="radio" name="mode" value="sim"> 模擬情境（有標準答案）</label>
+        <h2>研究競品網站</h2>
+        <label>競品網址（每行一個）
+          <textarea name="competitors" rows="2" placeholder="https://example.com"></textarea>
+        </label>
+        <label>關鍵字（每行一個）
+          <textarea name="keywords" rows="2" placeholder="高山茶&#10;烏龍茶"></textarea>
+        </label>
+        <label>自家網址（選填）
+          <input name="own_site" placeholder="https://your-site.com">
+        </label>
+        <div class="two">
+          <label>研究期間開始 <input type="date" name="start"></label>
+          <label>結束 <input type="date" name="end"></label>
         </div>
-        <div id="real-fields">
-          <label>競品網址（每行一個）
-            <textarea name="competitors" rows="2" placeholder="https://example.com"></textarea>
-          </label>
-          <label>關鍵字（每行一個）
-            <textarea name="keywords" rows="2" placeholder="高山茶&#10;烏龍茶"></textarea>
-          </label>
-          <label>自家網址（選填）
-            <input name="own_site" placeholder="https://your-site.com">
-          </label>
-          <div class="two">
-            <label>研究期間開始 <input type="date" name="start"></label>
-            <label>結束 <input type="date" name="end"></label>
-          </div>
-          <label>排名資料來源
-            <select name="serp_source" id="serp-source">
-              <option value="none">不使用（只分析競品網站本身）</option>
-              <option value="serpapi">SerpApi（Google 台灣的真實搜尋結果，按次計費）</option>
-              <option value="csv">上傳排名 CSV（從 Semrush、Ahrefs、Search Console 匯出）</option>
-            </select>
-          </label>
-          <input type="file" id="serp-csv" accept=".csv,text/csv" hidden>
-          <p class="hint" id="serp-hint"></p>
-          <p class="hint">Agent 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔，並用 Wayback Machine 比對頁面歷史版本。沒有排名歷史，所以研究的是「競品在這些關鍵字做了什麼內容策略」。開始前會請求一次首頁以確認正式網域。</p>
-        </div>
-        <div id="sim-fields" hidden>
-          <label>情境
-            <select name="scenario" id="scenario"></select>
-          </label>
-          <p class="hint" id="scenario-desc"></p>
-        </div>
-        <fieldset>
-          <legend>LLM</legend>
-          <label class="inline"><input type="radio" name="llm" value="fake" checked> 假 LLM（免費、可重現）</label>
-          <label class="inline"><input type="radio" name="llm" value="live" id="llm-live"> 真實 Opus（每次約 US$0.3）</label>
-          <p class="hint" id="key-hint"></p>
-          <p class="hint" id="llm-real-hint" hidden>真實網站建議使用真實 Opus：假 LLM 只是測試用的規則式替身，只會從排名網址或已確認的變動範本提出假設，常常得不出結論。</p>
-        </fieldset>
+        <label>排名資料來源
+          <select name="serp_source" id="serp-source">
+            <option value="none">不使用（只分析競品網站本身）</option>
+            <option value="serpapi">SerpApi（Google 台灣的真實搜尋結果，按次計費）</option>
+            <option value="csv">上傳排名 CSV（從 Semrush、Ahrefs、Search Console 匯出）</option>
+          </select>
+        </label>
+        <input type="file" id="serp-csv" accept=".csv,text/csv" hidden>
+        <p class="hint" id="serp-hint"></p>
+        <p class="hint">Agent 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔，並用 Wayback Machine 比對頁面歷史版本。沒有排名歷史，所以研究的是「競品在這些關鍵字做了什麼內容策略」。開始前會請求一次首頁以確認正式網域。</p>
+        <p class="hint" id="key-hint"></p>
         <fieldset>
           <legend>記憶</legend>
           <select name="memory" id="memory-mode">
             <option value="default">使用預設記憶（會學習）</option>
-            <option value="none">不使用記憶（Day 1）</option>
+            <option value="none">不使用記憶</option>
             <option value="custom">指定記憶檔…</option>
           </select>
-          <input name="memory_path" id="memory-path" placeholder="例如 data/exp1.db" hidden>
+          <input name="memory_path" id="memory-path" placeholder="例如 data/client-a.db" hidden>
           <label class="inline"><input type="checkbox" name="ablate" value="M1"> 關閉 M1 經驗庫</label>
           <label class="inline"><input type="checkbox" name="ablate" value="M2"> 關閉 M2 範本價值</label>
         </fieldset>
         <details>
-          <summary>進階：預算與世界種子</summary>
-          <label>抓取上限 <input type="number" name="max_fetches" id="max-fetches" min="5" placeholder="預設 300"></label>
+          <summary>進階：預算</summary>
+          <label>抓取上限 <input type="number" name="max_fetches" id="max-fetches" min="5" value="80"></label>
           <label>LLM 花費上限（US$） <input type="number" name="max_llm_usd" step="0.01" min="0.01" placeholder="預設 2.00"></label>
-          <label id="seed-label" hidden>世界種子 <input type="number" name="seed" placeholder="預設為情境的種子"></label>
-          <p class="hint">預算用盡但還有驗證工作時，Agent 會停下來請你核准延長。真實網站每次抓取間隔 2 秒，80 次約 3 分鐘。</p>
+          <p class="hint">預算用盡但還有驗證工作時，Agent 會停下來請你核准延長。每次抓取間隔約 2 秒，80 次約 3 分鐘。</p>
         </details>
         <label class="inline"><input type="checkbox" name="step" id="step-mode"> 逐步模式（每一步都停下來，由你按「下一步」）</label>
-        <button type="submit" class="primary" id="start-btn">開始研究</button>
+        <button type="submit" class="primary" id="start-btn">開始研究（真實 Opus，約 US$0.3）</button>
         <p class="error" id="research-error" hidden></p>
       </form>
 
@@ -95,7 +75,7 @@
           <h2>研究過程會即時顯示在這裡</h2>
           <p>每一步都看得到：Agent 做了什麼、為什麼這樣做（候選行動與分數）、看到了什麼、花了多少。</p>
           <ol>
-            <li>左邊選一個情境（例如 s1），按「開始研究」。</li>
+            <li>左邊填入競品網址與關鍵字，按「開始研究」。</li>
             <li>想看清楚每一步，就勾選「逐步模式」。</li>
             <li>結束後可以看結論、打開完整時間軸，或糾正它的結論。</li>
           </ol>
@@ -150,34 +130,6 @@
       </div>
       <p class="hint">M1 經驗庫：Agent 從成功、失敗與你的糾正中學到的經驗；程式會直接套用其中的偏置。M2：哪些網址範本常是答案所在。</p>
       <div id="memory-body"></div>
-    </div>
-  </section>
-
-  <!-- 評測 -->
-  <section id="tab-eval" class="tab" hidden>
-    <div class="layout">
-      <form id="eval-form" class="card form">
-        <h2>評測：學習有沒有讓 Agent 變好？</h2>
-        <p class="hint">依序執行：學習前（Day 1）→ 在訓練情境學習 → 學習後（Day N）→ 關閉 M1 / M2 的對照 → 緊縮預算。評分只依標準答案與伺服器紀錄。</p>
-        <fieldset>
-          <legend>LLM</legend>
-          <label class="inline"><input type="radio" name="llm" value="fake" checked> 假 LLM（免費，約 2 分鐘）</label>
-          <label class="inline"><input type="radio" name="llm" value="live" id="eval-live"> 真實 Opus（需設定花費上限）</label>
-        </fieldset>
-        <label>每個測試情境的種子數 <input type="number" name="seeds" value="3" min="1" max="10"></label>
-        <label>種子位移 <input type="number" name="test_offset" value="8000" step="1000"></label>
-        <p class="hint">用從沒看過的世界做獨立驗證（研究中的乾淨驗證組是 8000）。</p>
-        <label class="inline"><input type="checkbox" name="quick"> 只跑 Day 1 / 訓練 / Day N（略過消融與緊縮預算）</label>
-        <label id="max-usd-label" hidden>花費上限（US$） <input type="number" name="max_usd" step="0.5" min="1"></label>
-        <button type="submit" class="primary">開始評測</button>
-        <p class="error" id="eval-error" hidden></p>
-        <h3>先前的評測</h3>
-        <ul class="plain" id="eval-list"></ul>
-      </form>
-      <div class="card">
-        <pre class="log" id="eval-log" hidden></pre>
-        <div class="markdown" id="eval-report"><p class="muted">評測報告會顯示在這裡。</p></div>
-      </div>
     </div>
   </section>
 </main>

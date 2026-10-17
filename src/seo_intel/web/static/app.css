@@ -108,14 +108,6 @@ tr.clickable { cursor: pointer; } tr.clickable:hover { background: var(--accent-
 .plain { list-style: none; padding: 0; margin: 0; } .plain li { margin: .25rem 0; }
 
 .log { background: var(--code); padding: .7rem; border-radius: 8px; max-height: 40vh; overflow: auto; white-space: pre-wrap; }
-.markdown table { margin: .6rem 0; } .markdown h1 { font-size: 1.3rem; } .markdown h2 { margin-top: 1.4rem; }
-.markdown blockquote { margin: .5rem 0; padding: .3rem .8rem; border-left: 3px solid var(--line); color: var(--muted); }
-.markdown td:first-child { white-space: nowrap; }
 td:first-child { white-space: nowrap; }
-.segmented { display: flex; gap: .3rem; padding: .25rem; background: var(--code); border-radius: 10px; margin-bottom: .6rem; }
-.segmented label { flex: 1; text-align: center; margin: 0 !important; padding: .35rem .3rem; border-radius: 8px; cursor: pointer;
-  font-size: .88rem; color: var(--muted); }
-.segmented input { display: none; }
-.segmented label:has(input:checked) { background: var(--card); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
 .two label { margin: .3rem 0; }

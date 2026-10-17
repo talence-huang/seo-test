@@ -98,7 +98,6 @@ class BudgetLedger:
             return
         self.state.llm_usd = round(self.state.llm_usd + meta.usd, 8)
         self.state.llm_calls += 1
-        self.clock.sleep(meta.latency_ms / 1000)  # LLM 耗時也計入環境時間
 
     def charge_action(self) -> None:
         self.state.actions += 1

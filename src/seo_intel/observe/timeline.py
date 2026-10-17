@@ -227,14 +227,14 @@ def render_timeline(records: list[StepRecord], state: dict, frontier: dict | Non
                   for o in state.get("observations", []))
     env = ""
     if environment:
-        env = (f"<h2>環境判定（SimWeb 伺服器紀錄，非 Agent 自報）</h2><pre>"
+        env = (f"<h2>請求統計（每個主機的請求數與 HTTP 狀態）</h2><pre>"
                f"{_e(json.dumps(environment, ensure_ascii=False, indent=2))}</pre>")
     excluded = f"（排除：{_e(json.dumps(frontier['excluded'], ensure_ascii=False))}）" if frontier else ""
     return f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>研究時間軸 {_e(state['id'])}</title>
 <style>{_CSS}</style></head><body><main>
 <h1>{_e(goal.get('restated_question') or task['question'])}</h1>
-<div class="meta">Episode {_e(state['id'])} · 情境 {_e(task.get('scenario'))} · 自家站 {_e(task['own_site'])} ·
+<div class="meta">Episode {_e(state['id'])} · 關鍵字 {_e('、'.join(task.get('keywords') or []))} · 自家站 {_e(task['own_site'])} ·
 競品 {_e(', '.join(task['competitors']))} · 研究期間 {_e(goal.get('window_start'))} ～ {_e(goal.get('window_end'))} ·
 關鍵字 {_e(', '.join(goal.get('topic_keywords', [])))}</div>
 <div class="cards">{''.join(f'<div class="card"><span>{_e(k)}</span><b>{_e(v)}</b></div>' for k, v in cards)}</div>

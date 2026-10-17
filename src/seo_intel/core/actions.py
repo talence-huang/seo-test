@@ -38,27 +38,13 @@ def page_change_domains(ctx: EpisodeContext) -> list[str]:
 
 def _discovery(ctx: EpisodeContext) -> list[Action]:
     st = ctx.state
-    own = st.task.own_site
     focus = set(st.goal.focus_domains) | set(st.serp_gainers)
-    rank_ready = any(o.kind == "rank_change" and o.data.get("site") == own for o in st.observations)
     out: list[Action] = []
     for n in _open(ctx):
         b = _base(n)
-        if n.kind == "rank_change":
-            for d in n.target_domains:
-                out.append(Action(tool="rank_scan", args={"site": d, "scope": "topic"}, need_id=n.id,
-                                  phase=Phase.DISCOVERY, score=b, breakdown={"priority": b},
-                                  reason=f"回答 {n.id}：{d} 在主題查詢上的排名變化與起始時間"))
-        elif n.kind == "control_check":
-            out.append(Action(tool="rank_scan", args={"site": own, "scope": "control"}, need_id=n.id,
-                              phase=Phase.DISCOVERY, score=b, breakdown={"priority": b},
-                              reason=f"回答 {n.id}：以非主題查詢作對照組，排除全站性因素"))
-        elif n.kind == "serp_competitors":
-            penalty = 0.0 if rank_ready else -0.3
-            out.append(Action(tool="serp_scan", args={"need": n.id}, need_id=n.id, phase=Phase.DISCOVERY,
-                              score=round(b + penalty, 3), breakdown={"priority": b, "dependency": penalty},
-                              reason=f"回答 {n.id}：比較主題查詢前後的 SERP，找出取代者"
-                                     + ("" if rank_ready else "（尚無排名變化資料，先用關鍵字相符的查詢）")))
+        if n.kind == "serp_competitors":
+            out.append(Action(tool="serp_scan", args={"need": n.id}, need_id=n.id, phase=Phase.DISCOVERY, score=b,
+                              breakdown={"priority": b}, reason=f"回答 {n.id}：這些關鍵字目前誰排在前面、排的是哪些頁面"))
         elif n.kind == "site_inventory":
             for d in n.target_domains:
                 bonus = 0.05 if d in focus else 0.0

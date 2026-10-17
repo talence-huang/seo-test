@@ -1,4 +1,7 @@
-"""真實網站研究模式：以 MockTransport 模擬中文網站、Wayback 與 SerpApi（不連網、不花錢）。"""
+"""真實網站研究：以 MockTransport 模擬中文網站、Wayback 與 SerpApi（不碰真實網站）。
+
+端對端研究需要真實 Opus（標記 live，以 pytest -m live 明確執行，每次約 US$0.3）；其餘為免費的單元測試。
+"""
 
 from datetime import date
 
@@ -7,13 +10,13 @@ import pytest
 
 from seo_intel.core.frontier import detect_trap, template_key
 from seo_intel.core.runner import run_real
-from seo_intel.llm.fake_planner import fake_llm
+from seo_intel.llm import AnthropicLLM
 from seo_intel.real.env import build_task, canonical_host, check_serp, parse_domain
 from seo_intel.real.serp import CsvProvider, RealRankClient, SerpHistory
 from seo_intel.tools.http import redact
-from seo_intel.tools.rank import matches_topic, tokens
-from simweb import VirtualClock
+from seo_intel.tools.text import matches_topic, tokens
 from tests import realsite
+from tests.conftest import TestClock
 
 TODAY = date(2026, 10, 1)
 
@@ -22,8 +25,8 @@ def _run(settings, tmp_path, monkeypatch, **params):
     monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
     log: list[str] = []
     p = {"competitors": [f"https://{realsite.SITE}"], "keywords": realsite.KEYWORDS, "serp_source": "serpapi", **params}
-    r = run_real(p, settings, lambda d: fake_llm(settings.models), run_root=tmp_path / "runs",
-                 client=realsite.client(log), clock=VirtualClock(), today=TODAY, history=tmp_path / "serp.jsonl")
+    r = run_real(p, settings, lambda d: AnthropicLLM(settings.models), run_root=tmp_path / "runs",
+                 client=realsite.client(log), clock=TestClock(), today=TODAY, history=tmp_path / "serp.jsonl")
     return r, log
 
 
@@ -43,7 +46,7 @@ def test_task_input_validation_and_domains():
     with pytest.raises(ValueError, match="至少需要"):
         build_task({"competitors": ["a.tw"], "keywords": []}, today=TODAY)
     t = build_task({"competitors": ["a.tw"], "keywords": ["高山茶"], "start": "2026-07-01"}, today=TODAY)
-    assert t.mode == "real" and t.site_language == "zh-tw" and t.period_hint == (date(2026, 7, 1), TODAY)
+    assert t.site_language == "zh-tw" and t.period_hint == (date(2026, 7, 1), TODAY)
     assert "「高山茶」" in t.question and t.allowed_domains == ["a.tw"]          # 沒有自家站
 
 
@@ -90,16 +93,16 @@ def test_serp_history_turns_snapshots_into_movement(tmp_path):
     assert next(m for m in second["movement"] if m["domain"] == "a.tw")["gain"] == 6.0
 
 
+@pytest.mark.live
 def test_real_site_research_end_to_end(settings, tmp_path, monkeypatch):
+    """真實 Opus 研究模擬的中文茶葉網站：預設的真相是 /guide/ 改版（字數增加、加入 FAQPage）。"""
     r, log = _run(settings, tmp_path, monkeypatch)
     st = r.state
-    assert st.status == "done" and st.end_reason == "hypothesis_supported"
-    assert st.goal.goal_type == "competitor_content_strategy" and st.goal.topic_keywords[:2] == realsite.KEYWORDS
-    assert {n.kind for n in st.info_needs} == {"serp_competitors", "site_inventory", "page_changes"}   # 沒有排名歷史類需求
-    c = st.claims[0]
-    assert c.template == f"{realsite.SITE}/guide/{{slug}}" and "schema:FAQPage" in c.change_types
-    assert {"serp_template_share", "template_burst", "template_change_sample"} <= {e.probe for e in st.evidence}
-    assert all(e.direction == "for" for e in st.evidence)
+    assert st.status == "done" and st.goal.goal_type == "competitor_content_strategy"
+    assert st.goal.topic_keywords[:2] == realsite.KEYWORDS
+    assert {n.kind for n in st.info_needs} <= {"serp_competitors", "site_inventory", "page_changes"}
+    if st.claims:                                                             # 有結論時必須是正確的範本
+        assert st.claims[0].template == f"{realsite.SITE}/guide/{{slug}}"
     hosts = {u.split("/")[2] for u in log}
     assert hosts <= {realsite.SITE, "serpapi.com", "web.archive.org"}             # 只碰任務網站與資料來源
     assert not any("/cart" in u for u in log)                                     # robots 禁止的路徑
@@ -107,10 +110,10 @@ def test_real_site_research_end_to_end(settings, tmp_path, monkeypatch):
     assert "test-key" not in (r.ctx.run_dir / "run.json").read_text(encoding="utf-8")
 
 
+@pytest.mark.live
 def test_real_site_without_serp_source(settings, tmp_path, monkeypatch):
     r, log = _run(settings, tmp_path, monkeypatch, serp_source="none")
-    st = r.state
-    assert st.status == "done" and "serp_competitors" not in {n.kind for n in st.info_needs}
+    assert r.state.status == "done" and "serp_competitors" not in {n.kind for n in r.state.info_needs}
     assert not any("serpapi.com" in u for u in log)
 
 

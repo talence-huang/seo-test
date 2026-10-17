@@ -16,7 +16,7 @@ class DbRecorder:
         self.state = state
         if not db.query("SELECT id FROM episodes WHERE id = ?", (state.id,)):
             db.insert("episodes", {
-                "id": state.id, "scenario": state.task.scenario, "goal_json": state.task.model_dump(mode="json"),
+                "id": state.id, "scenario": state.task.label, "goal_json": state.task.model_dump(mode="json"),
                 "status": state.status, "budget_json": state.budget.model_dump(), "started_at": utc_now(),
             })
 

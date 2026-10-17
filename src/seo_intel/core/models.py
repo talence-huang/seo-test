@@ -38,26 +38,28 @@ PHASE_ORDER = (Phase.DISCOVERY, Phase.SAMPLING, Phase.TARGETED, Phase.VERIFICATI
 
 InfoKind = Literal["rank_change", "control_check", "serp_competitors", "site_inventory", "page_changes"]
 DISCOVERY_KINDS = frozenset({"rank_change", "control_check", "serp_competitors", "site_inventory"})
-ToolName = Literal["rank_scan", "serp_scan", "discover", "fetch", "history_diff"]
+ToolName = Literal["serp_scan", "discover", "fetch", "history_diff"]
 
 
 class TaskInput(BaseModel):
-    """使用者交給 Agent 的任務（Agent 唯一知道的事；不含任何標準答案）。"""
+    """使用者交給 Agent 的研究任務：競品網站、關鍵字與研究期間（真實網站沒有排名歷史與標準答案）。"""
 
-    scenario: str | None = None
     question: str
-    own_site: str
+    own_site: str = ""
     competitors: list[str]
     today: date
     period_hint: tuple[date, date] | None = None
     site_language: str = "en"
-    mode: Literal["sim", "real"] = "sim"           # real：研究真實網站（沒有排名歷史與標準答案）
-    keywords: list[str] = []                       # 使用者指定的關鍵字（真實網站模式）
-    serp_source: Literal["sim", "none", "serpapi", "csv"] = "sim"   # 排名資料從哪裡來
+    keywords: list[str] = []                       # 使用者指定的關鍵字
+    serp_source: Literal["none", "serpapi", "csv"] = "none"   # 目前 SERP 從哪裡來
 
     @property
     def allowed_domains(self) -> list[str]:
         return [d for d in (self.own_site, *self.competitors) if d]
+
+    @property
+    def label(self) -> str:
+        return f"{'、'.join(self.competitors)}｜{'、'.join(self.keywords)}"
 
 
 class ResearchGoal(BaseModel):
@@ -125,7 +127,7 @@ class Hypothesis(BaseModel):
     category: HypothesisCategory
     statement: str
     subject_site: str | None = None
-    template: str | None = None          # 範本鍵，例如 shieldguide.sim/guide/{slug}
+    template: str | None = None          # 範本鍵，例如 example.com/guide/{slug}
     mechanism: str = ""
     prediction: str
     falsification: str
@@ -253,7 +255,6 @@ class EpisodeState(BaseModel):
     serp_gainers: list[str] = []
     budget: BudgetState = BudgetState()
     clock_at: float = 0.0
-    world_seed: int | None = None                  # SimWeb 世界種子覆寫（None＝情境預設），續跑時重建同一個世界
     approvals: list[Approval] = []                 # 所有核准請求（含已決定的，供稽核）
     grants: list[dict[str, str]] = []              # 已核准、尚未使用的一次性授權 {approval, rule, signature}
     denials: list[dict[str, str]] = []             # 人工拒絕的範圍 {approval, rule, scope}：之後直接拒絕、不再詢問

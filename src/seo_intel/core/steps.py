@@ -44,7 +44,7 @@ from seo_intel.llm.roles import (
 from seo_intel.llm.types import LLMError
 from seo_intel.tools.extract import PageFeatures, looks_like_instructions, redact_instructions
 from seo_intel.tools.history import history_diff
-from seo_intel.tools.rank import matches_topic, rank_scan, serp_scan, tokens
+from seo_intel.tools.text import tokens
 from seo_intel.tools.site import discover, fetch_page
 
 _QUOTED = re.compile(r"「([^」]+)」")
@@ -145,9 +145,9 @@ def normalize_goal(out: GoalOut | None, task: TaskInput) -> tuple[ResearchGoal, 
     if len(focus) != len(out.focus_domains):
         notes.append("已移除不在任務競品清單中的焦點網域")
     goal_type = out.goal_type
-    if task.mode == "real" and goal_type == "ranking_drop_cause":
+    if goal_type == "ranking_drop_cause":
         goal_type = "competitor_content_strategy"
-        notes.append("真實網站模式沒有排名歷史，無法診斷排名下滑原因；改為研究競品的內容策略")
+        notes.append("真實網站沒有排名歷史，無法診斷排名下滑原因；改為研究競品的內容策略")
     return ResearchGoal(restated_question=out.restated_question, goal_type=goal_type,
                         topic_keywords=keywords, focus_domains=focus or task.competitors,
                         window_start=ws, window_end=we, success_criteria=out.success_criteria), notes
@@ -196,9 +196,7 @@ def define_goal(ctx: EpisodeContext) -> StepOutcome:
 # ---------- PLAN_INFO_NEEDS ----------
 
 def unavailable_kinds(task: TaskInput) -> set[str]:
-    """真實網站拿不到的資料需求（模擬世界什麼都有）。"""
-    if task.mode != "real":
-        return set()
+    """真實網站拿不到的資料需求：沒有排名歷史；沒有設定排名來源時也沒有目前的 SERP。"""
     return REAL_UNAVAILABLE | ({"serp_competitors"} if task.serp_source == "none" else set())
 
 
@@ -218,7 +216,7 @@ def normalize_plan(out: PlanOut | None, task: TaskInput, goal: ResearchGoal) -> 
         if raw.kind in ("site_inventory", "page_changes"):
             targets = [d for d in targets if d in comps]
         if not targets:
-            targets = [own] if raw.kind == "rank_change" and goal.goal_type == "ranking_drop_cause" else goal.focus_domains
+            targets = goal.focus_domains
             notes.append(f"{raw.kind} 未指定有效網域，改用 {', '.join(targets)}")
         key = (raw.kind, tuple(targets))
         if key in seen:
@@ -227,16 +225,11 @@ def normalize_plan(out: PlanOut | None, task: TaskInput, goal: ResearchGoal) -> 
         needs.append(InfoNeed(id=f"N{len(needs) + 1}", kind=raw.kind, question=raw.question, target_domains=targets,
                               answer_criteria=raw.answer_criteria, priority=min(5, max(1, raw.priority)),
                               must_answer=raw.must_answer))
-    essentials = {
-        "rank_change": ([own] if goal.goal_type == "ranking_drop_cause" else goal.focus_domains, 1,
-                        "目標網域在主題查詢上的排名如何變化？"),
-        "page_changes": (goal.focus_domains, 3, "競品主題頁面在期間內改了什麼？"),
-    }
-    if task.mode == "real":   # 真實網站：沒有排名歷史；網站盤點與（有來源時）目前 SERP 是必要的證據
-        essentials = {"site_inventory": (goal.focus_domains, 1, "競品有哪些頁面範本，哪些近期有更新？"),
-                      "page_changes": (goal.focus_domains, 2, "競品在這些關鍵字相關的頁面做了什麼？")}
-        if task.serp_source != "none":
-            essentials["serp_competitors"] = (comps, 1, "這些關鍵字目前誰排在前面、排的是哪些頁面？")
+    # 沒有排名歷史：網站盤點、頁面變化與（有來源時）目前 SERP 是必要的證據
+    essentials = {"site_inventory": (goal.focus_domains, 1, "競品有哪些頁面範本，哪些近期有更新？"),
+                  "page_changes": (goal.focus_domains, 2, "競品在這些關鍵字相關的頁面做了什麼？")}
+    if task.serp_source != "none":
+        essentials["serp_competitors"] = (comps, 1, "這些關鍵字目前誰排在前面、排的是哪些頁面？")
     for kind, (targets, prio, question) in essentials.items():
         if not any(n.kind == kind for n in needs):
             needs.append(InfoNeed(id=f"N{len(needs) + 1}", kind=kind, question=question, target_domains=targets,
@@ -253,7 +246,7 @@ def plan_info_needs(ctx: EpisodeContext) -> StepOutcome:
     applied = []
     if ctx.memory is not None:   # M1 偏置：調整資訊需求優先序，缺少時補上
         own, focus = st.task.own_site, st.goal.focus_domains
-        default_targets = {"control_check": [own], "rank_change": [own], "serp_competitors": st.task.competitors,
+        default_targets = {"serp_competitors": st.task.competitors,
                            "site_inventory": focus, "page_changes": focus}
         for lesson, b in ctx.memory.biases("info_need_priority"):
             if b.kind in unavailable_kinds(st.task):
@@ -436,27 +429,6 @@ def select_action(ctx: EpisodeContext) -> StepOutcome:
 
 # ---------- EXECUTE_TOOL ----------
 
-def _rank_obs(ctx: EpisodeContext, site: str | None = None):
-    obs = [o for o in ctx.state.observations if o.kind == "rank_change" and (site is None or o.data["site"] == site)]
-    return obs[-1] if obs else None
-
-
-def _serp_inputs(ctx: EpisodeContext) -> tuple[list[str], date, date]:
-    st = ctx.state
-    ws, _ = _window(ctx)
-    obs = _rank_obs(ctx, st.task.own_site) or _rank_obs(ctx)
-    onset = None
-    if obs and obs.data["aggregate"].get("top_movers"):
-        queries = obs.data["aggregate"]["top_movers"]
-        raw_onset = obs.data["aggregate"].get("onset_median")
-        onset = date.fromisoformat(raw_onset) if raw_onset else None
-    else:
-        queries = [q for q in ctx.rank.queries(st.task.own_site) if matches_topic(q, st.goal.topic_keywords)][:3]
-    before = onset - timedelta(days=10) if onset else ws + timedelta(days=7)
-    after = st.task.today - timedelta(days=2)
-    return queries, before, after
-
-
 def _features_from_info(url: str, info: dict) -> PageFeatures:
     return PageFeatures(url=url, h2=info.get("h2", []), word_count=info.get("words", 0),
                         schema_types=info.get("schema", []), faq_count=info.get("faq", 0),
@@ -471,16 +443,9 @@ def execute_tool(ctx: EpisodeContext) -> StepOutcome:
     t0 = ctx.clock.now()
     summary = a.label()
     try:
-        if a.tool == "rank_scan":
-            raw = rank_scan(ctx.rank, a.args["site"], st.goal.topic_keywords, _window(ctx), a.args["scope"])
-            summary = f"rank_scan {a.args['site']}（{a.args['scope']}）→ {raw['aggregate'].get('n_queries', 0)} 個查詢"
-        elif a.tool == "serp_scan" and getattr(ctx.rank, "real", False):
+        if a.tool == "serp_scan":
             raw = ctx.rank.serp_snapshot(st.task.keywords or st.goal.topic_keywords, st.task.competitors)
             summary = f"serp_scan {len(raw['queries'])} 個關鍵字（{raw['source']}，{raw['after']}）"
-        elif a.tool == "serp_scan":
-            queries, before, after = _serp_inputs(ctx)
-            raw = serp_scan(ctx.rank, queries, before, after, st.task.competitors)
-            summary = f"serp_scan {len(queries)} 個查詢 × {before} / {after}"
         elif a.tool == "discover":
             raw = discover(ctx.http, a.args["domain"])
             summary = f"discover {a.args['domain']} → {len(raw['entries']):,} 個 URL（{len(raw['sitemaps'])} 個 sitemap）"
@@ -541,37 +506,6 @@ def _check_page_changes(ctx: EpisodeContext, out: StepOutcome) -> None:
                     types["new_page"] += 1
         top = "、".join(f"{t}×{c}" for t, c in types.most_common(4)) or "變動"
         _resolve(need, f"{tkey}：{n} 頁在期間內出現顯著變動或新增（{top}）", out)
-
-
-def _parse_rank(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
-    st, a = ctx.state, ctx.state.pending
-    agg, site, scope = raw["aggregate"], raw["site"], raw["scope"]
-    kind = "rank_change" if scope == "topic" else "rank_control"
-    label = "主題查詢" if scope == "topic" else "非主題查詢（對照組）"
-    if not agg.get("n_queries"):
-        summary = f"{site} {label}：沒有可分析的查詢（與關鍵字相符的查詢 {raw['n_topic']} 個）"
-    else:
-        summary = (f"{site} {label} {agg['n_queries']} 個：平均排名變化 {agg['mean_delta']:+.1f}（正值＝變差），"
-                   f"{agg['n_significant']} 個顯著，起始約 {agg['onset_median'] or '未偵測到'}")
-    obs = st.add_observation(kind, summary, raw, need_id=a.need_id)
-    out.observations.append(obs.id)
-    out.summary = f"{obs.id} {summary}"
-    for need in st.info_needs:
-        if need.status != "open":
-            continue
-        if need.kind == "rank_change" and scope == "topic":
-            latest = {o.data["site"]: o for o in st.observations if o.kind == "rank_change"}
-            if set(need.target_domains) <= set(latest):
-                parts = []
-                for d in need.target_domains:
-                    ag = latest[d].data["aggregate"]
-                    parts.append(f"{d} {ag['mean_delta']:+.1f}（起始 {ag['onset_median'] or '—'}）"
-                                 if ag.get("n_queries") else f"{d} 無資料")
-                ok = any(latest[d].data["aggregate"].get("n_queries") for d in need.target_domains)
-                _resolve(need, "主題查詢平均排名變化（正值＝變差）：" + "；".join(parts), out,
-                         "resolved" if ok else "exhausted")
-        if need.kind == "control_check" and scope == "control":
-            _resolve(need, summary, out)
 
 
 def _parse_serp(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
@@ -734,7 +668,7 @@ def parse_result(ctx: EpisodeContext) -> StepOutcome:
         out.summary, out.observations = obs.summary, [obs.id]
     else:
         try:
-            {"rank_scan": _parse_rank, "serp_scan": _parse_serp, "discover": _parse_discover, "fetch": _parse_fetch,
+            {"serp_scan": _parse_serp, "discover": _parse_discover, "fetch": _parse_fetch,
              "history_diff": _parse_history}[st.pending.tool](ctx, raw, out)
         except Exception as e:   # F3：解析失敗（例如資料格式異常）只影響這一筆結果
             obs = st.add_observation("tool_error", f"{st.pending.label()} 結果無法解析：{type(e).__name__}: {e}",
@@ -1091,7 +1025,7 @@ def report(ctx: EpisodeContext) -> StepOutcome:
         (ctx.run_dir / "report.md").write_text(render_markdown(st, claims, cleaned, stats, confounder), encoding="utf-8")
     b = st.budget
     (ctx.run_dir / "summary.json").write_text(json.dumps({
-        "episode": st.id, "scenario": st.task.scenario, "end_reason": st.end_reason,
+        "episode": st.id, "task": st.task.model_dump(mode="json"), "end_reason": st.end_reason,
         "goal": st.goal.model_dump(mode="json") if st.goal else None,
         "claims": [c.model_dump(mode="json") for c in claims],
         "hypotheses": [h.model_dump(mode="json") for h in st.hypotheses],

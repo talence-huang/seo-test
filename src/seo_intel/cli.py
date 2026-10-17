@@ -23,23 +23,19 @@ app = typer.Typer(help="可觀察的自主 SEO 競爭情報研究 Agent", no_arg
 db_app = typer.Typer(help="資料庫", no_args_is_help=True)
 config_app = typer.Typer(help="設定", no_args_is_help=True)
 llm_app = typer.Typer(help="LLM 連線", no_args_is_help=True)
-simweb_app = typer.Typer(help="SimWeb 研究環境", no_args_is_help=True)
-research_app = typer.Typer(help="執行研究 episode（seo-intel research --scenario s1）")
+research_app = typer.Typer(help="研究真實網站（seo-intel research --site <網址> --keyword <關鍵字>）")
 trace_app = typer.Typer(help="檢視研究過程", no_args_is_help=True)
 memory_app = typer.Typer(help="記憶（M1 經驗庫、M2 URL 價值）", no_args_is_help=True)
 feedback_app = typer.Typer(help="人工糾偏", no_args_is_help=True)
 approvals_app = typer.Typer(help="人工核准（需核准的動作會讓 episode 存檔暫停）", no_args_is_help=True)
-eval_app = typer.Typer(help="評測：Day 1 vs Day N、消融、緊縮預算", no_args_is_help=True)
 app.add_typer(db_app, name="db")
 app.add_typer(config_app, name="config")
 app.add_typer(llm_app, name="llm")
-app.add_typer(simweb_app, name="simweb")
 app.add_typer(research_app, name="research")
 app.add_typer(trace_app, name="trace")
 app.add_typer(memory_app, name="memory")
 app.add_typer(feedback_app, name="feedback")
 app.add_typer(approvals_app, name="approvals")
-app.add_typer(eval_app, name="eval")
 
 console = Console()
 DbPath = Annotated[Path, typer.Option("--path", help="SQLite 檔案路徑")]
@@ -71,7 +67,7 @@ def web(
     port: Annotated[int, typer.Option(help="埠號（只綁定 127.0.0.1）")] = 8765,
     open_browser: Annotated[bool, typer.Option("--open/--no-open", help="啟動後自動開啟瀏覽器")] = True,
 ) -> None:
-    """啟動本機網頁介面：開始研究並即時觀看、核准 / 拒絕、糾正結論、檢視記憶、執行評測。"""
+    """啟動本機網頁介面：研究競品網站並即時觀看、核准 / 拒絕、糾正結論、檢視記憶。"""
     import webbrowser
 
     from seo_intel.web.server import serve
@@ -185,126 +181,15 @@ def llm_ping(role: Annotated[str, typer.Option(help="使用哪個角色的設定
     console.print(t)
 
 
-ScenarioOpt = Annotated[str, typer.Option("--scenario", "-s", help="情境 ID，例如 s1")]
-
-
-@simweb_app.command("list")
-def simweb_list() -> None:
-    """列出所有情境。"""
-    from simweb import build, list_scenarios
-
-    t = Table("情境", "集合", "網站類型", "目標", "網站與規模（sitemap URL 數）", title="SimWeb 情境")
-    for spec in list_scenarios():
-        world = build(spec.id).world
-        sizes = " · ".join(f"{d} {world.sitemap_size(d):,}" for d in world.sites)
-        t.add_row(spec.id, spec.split, spec.archetype, spec.goal.type, sizes)
-    console.print(t)
-
-
-@simweb_app.command("inspect")
-def simweb_inspect(scenario: ScenarioOpt) -> None:
-    """檢視情境：網站、植入事件、標準答案，以及植入效應是否可在排名資料中觀察到。"""
-    from datetime import timedelta
-    from statistics import mean
-
-    from simweb import build
-
-    sim = build(scenario)
-    spec, w, truth = sim.spec, sim.world, sim.truth
-    g = spec.goal
-    console.print(f"[bold]情境 {spec.id}[/]（{spec.split}，{spec.archetype}，種子 {spec.seed}，現在 {spec.now}）")
-    console.print(f"[bold]研究問題[/]：{g.question}")
-    console.print(f"自家站 {g.own_site} · 競品 {', '.join(g.competitors)} · 主題 {g.cluster} · 期間 {g.window[0]}～{g.window[1]}")
-
-    sites = Table("網站", "角色", "sitemap URL", "crawl-delay", "WAF 路徑", "不穩定率", "損壞 HTML", "注入頁", title="網站與反爬設定")
-    for d, s in w.sites.items():
-        inj = w.injection_page(d)
-        sites.add_row(d, s.spec.role, f"{w.sitemap_size(d):,}", f"{s.spec.crawl_delay:g}s",
-                      ", ".join(s.spec.waf_prefixes) or "—", f"{s.spec.flaky_rate:.0%}", f"{s.spec.malformed_rate:.0%}",
-                      inj.path if inj else "—")
-    console.print(sites)
-
-    tpl = Table("網站", "範本", "種類", "頁數", title="範本分布")
-    for d, s in w.sites.items():
-        for t in s.templates.values():
-            tpl.add_row(d, t.prefix, t.kind, f"{t.count:,}")
-    console.print(tpl)
-
-    caused = {fx.cause: fx for fx in spec.effects}
-    ev_t = Table("事件", "網站", "範本", "類型", "主題", "頁數", "日期", "變動", "角色", title="植入事件")
-    for e in spec.events:
-        t = w.sites[e.site].templates[e.template]
-        role = f"[green]因果（{caused[e.id].id}）[/]" if e.id in caused else "[yellow]干擾項[/]"
-        ev_t.add_row(e.id, e.site, t.prefix, e.kind, e.cluster or "—", str(len(w.event_pages[e.id])),
-                     f"{e.date}～{e.date + timedelta(days=e.spread_days)}", ", ".join(e.change_types(t)), role)
-    console.print(ev_t)
-    for cf in spec.confounders:
-        console.print(f"[bold]混淆因子[/] {cf.id}：{cf.date} 起自家站全站排名變差 {cf.own_shift:g} 名")
-
-    ans = Table("類型", "網站", "範本", "主題", "變動類型", "時間窗", "方向", title="標準答案（由事件自動推導）")
-    for c in truth.key_claims:
-        ans.add_row(c.claim_type, c.subject_site, c.template_prefix, c.cluster, ", ".join(c.change_types),
-                    f"{c.date_window[0]}～{c.date_window[1]}", c.direction)
-    console.print(ans)
-    if truth.distractors:
-        console.print("[bold]不應被當成原因[/]：" + "；".join(f"{x.subject_site}{x.template_prefix}" for x in truth.distractors))
-
-    rank = sim.server.rank
-    first = min(spec.event(c.event_id).date for c in truth.key_claims)
-    before = (first - timedelta(days=35), first - timedelta(days=5))
-    after = (spec.now - timedelta(days=16), rank.latest_date)
-    control = next(c for c in w.archetype.clusters if c != g.cluster)
-
-    def avg(site: str, cluster: str, span) -> float:
-        qs = [q for q, c in rank.queries() if c == cluster]
-        days = [span[0] + timedelta(days=i) for i in range((span[1] - span[0]).days + 1)]
-        return mean(rank.position(site, q, d) for q in qs for d in days)
-
-    obs = Table("網站", "主題", f"事件前 {before[0]}～{before[1]}", f"近期 {after[0]}～{after[1]}", "變化（正值＝變差）",
-                title="植入效應可觀察性檢查（平均排名）")
-    focus = truth.key_claims[0].subject_site
-    for site, cluster, label in [(g.own_site, g.cluster, "目標主題"), (g.own_site, control, "對照主題"),
-                                 (focus, g.cluster, "目標主題")]:
-        b, a = avg(site, cluster, before), avg(site, cluster, after)
-        obs.add_row(site, f"{label}：{cluster}", f"{b:.1f}", f"{a:.1f}", f"{a - b:+.1f}")
-    console.print(obs)
-
-
-@simweb_app.command("fetch")
-def simweb_fetch(
-    scenario: ScenarioOpt,
-    url: Annotated[str, typer.Argument(help="要抓取的完整網址")],
-    lines: Annotated[int, typer.Option(help="顯示前幾行內容")] = 15,
-) -> None:
-    """在情境中抓取一個網址（手動瀏覽模擬世界用）。"""
-    import httpx
-
-    from simweb import build
-
-    sim = build(scenario)
-    try:
-        r = sim.client().get(url)
-    except httpx.HTTPError as e:
-        console.print(f"[red]{type(e).__name__}[/]：{e}")
-        raise typer.Exit(1) from e
-    console.print(f"[bold]{r.status_code}[/] {url}（{r.headers.get('content-type')}，{len(r.content):,} bytes）")
-    text = r.text.replace("><", ">\n<")
-    console.print("\n".join(text.splitlines()[:lines]), markup=False, highlight=False)
-    flags = sim.server.log.records[-1].flags if sim.server.log.records else ()
-    if flags:
-        console.print(f"[yellow]環境紀錄的旗標[/]：{', '.join(flags)}")
-
-
 # ---------- 研究 episode ----------
 
-LlmOpt = Annotated[str, typer.Option("--llm", help="live：真實 API（自動錄製）；fake：確定性假規劃器（免費）；replay：重播錄製檔")]
 StepOpt = Annotated[bool, typer.Option("--step", help="逐步模式：每一步暫停，可隨時存檔離開")]
 QuietOpt = Annotated[bool, typer.Option("--quiet", help="不輸出即時步驟")]
 VerboseOpt = Annotated[bool, typer.Option("--verbose", help="也顯示例行的「繼續」判斷")]
 MemoryOpt = Annotated[Path | None, typer.Option("--memory", help="記憶資料庫（跨 episode 共用，預設 data/memory.db）")]
-NoMemoryOpt = Annotated[bool, typer.Option("--no-memory", help="不使用記憶（相當於 Day 1）")]
-AblateOpt = Annotated[str, typer.Option("--ablate", help="關閉部分記憶做消融實驗，例如 M1 或 M1,M2")]
-MaxFetchesOpt = Annotated[int | None, typer.Option("--max-fetches", help="覆寫抓取預算（例如緊縮預算實驗）")]
+NoMemoryOpt = Annotated[bool, typer.Option("--no-memory", help="不使用記憶")]
+AblateOpt = Annotated[str, typer.Option("--ablate", help="關閉部分記憶，例如 M1 或 M1,M2")]
+MaxFetchesOpt = Annotated[int | None, typer.Option("--max-fetches", help="覆寫抓取預算（每次抓取間隔約 2 秒）")]
 MaxLlmOpt = Annotated[float | None, typer.Option("--max-llm-usd", help="覆寫 LLM 花費上限（US$）")]
 
 
@@ -312,16 +197,6 @@ def _default_memory() -> Path:
     from seo_intel.core.runner import DEFAULT_MEMORY
 
     return DEFAULT_MEMORY
-
-
-def _new_run_config(run_dir: Path, memory: Path | None, ablate: str, budget: dict) -> dict:
-    """把記憶與預算設定寫入 run 目錄（run.json），續跑時沿用同一份設定。"""
-    from seo_intel.core.runner import save_run_config
-
-    flags = sorted({x.strip().upper() for x in ablate.split(",") if x.strip()})
-    if bad := set(flags) - {"M1", "M2"}:
-        raise typer.BadParameter(f"--ablate 只接受 M1、M2：{', '.join(sorted(bad))}")
-    return save_run_config(run_dir, memory, flags, {k: v for k, v in budget.items() if v is not None})
 
 
 class StepPrompter:
@@ -341,17 +216,11 @@ class StepPrompter:
         return answer != "q"
 
 
-def _make_llm(mode: str, settings, run_dir: Path, cassette: Path | None):
-    from seo_intel.llm import AnthropicLLM, RecordingLLM, ReplayLLM
-    from seo_intel.llm.fake_planner import fake_llm
+def _make_llm(settings, run_dir: Path):
+    """真實 Opus；每次呼叫錄製到 run 目錄（稽核用）。"""
+    from seo_intel.llm import AnthropicLLM, RecordingLLM
 
-    if mode == "fake":
-        return fake_llm(settings.models)
-    if mode == "replay":
-        return ReplayLLM(cassette or run_dir / "llm_cassette.jsonl")
-    if mode == "live":
-        return RecordingLLM(AnthropicLLM(settings.models), run_dir / "llm_cassette.jsonl")
-    raise typer.BadParameter(f"未知的 --llm 模式：{mode}")
+    return RecordingLLM(AnthropicLLM(settings.models), run_dir / "llm_cassette.jsonl")
 
 
 def _ask_inline(ectx) -> list[str] | None:
@@ -370,9 +239,10 @@ def _ask_inline(ectx) -> list[str] | None:
     return approvals.resume(ectx)
 
 
-def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path, resumed: bool,
+def _execute(ectx, *, step: bool, quiet: bool, verbose: bool, db_path: Path, resumed: bool,
              notes: list[str] | None = None) -> None:
     from seo_intel.core.loop import ResearchLoop
+    from seo_intel.core.runner import write_artifacts
     from seo_intel.observe.console import ConsoleObserver
     from seo_intel.observe.store import DbRecorder
     from seo_intel.observe.trace import TraceWriter
@@ -387,12 +257,13 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
         observers.insert(0, ConsoleObserver(console, verbose))
     console.rule(f"[bold]Episode {st.id}{'（續跑）' if resumed else ''}")
     console.print(f"[bold]任務[/]：{st.task.question}")
-    console.print(f"自家站 {st.task.own_site} · 競品 {', '.join(st.task.competitors)} · 今天 {st.task.today}")
+    console.print(f"競品 {', '.join(st.task.competitors)} · 關鍵字 {'、'.join(st.task.keywords)} · "
+                  f"排名來源 {st.task.serp_source} · 今天 {st.task.today}")
     ledger = ectx.ledger
     console.print(f"預算：抓取 {ledger.max_fetches} 次、LLM US${ledger.max_llm_usd:.2f}、API {ledger.cfg.max_api_calls} 次")
     mem = ectx.memory
     console.print(f"記憶：{mem.store.path}（M1 {'開' if mem.use_m1 else '關'}、M2 {'開' if mem.use_m2 else '關'}）\n"
-                  if mem else "記憶：未啟用（Day 1）\n")
+                  if mem else "記憶：未啟用\n")
     loop = ResearchLoop(ectx, observers, step_hook=StepPrompter(console) if step else None)
     try:
         if notes:
@@ -403,18 +274,13 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
             loop.run()
     finally:
         db.close()
-        _write_artifacts(ectx, sim)
+        write_artifacts(ectx)
         if mem:
             mem.store.close()
     console.rule("[bold]結果")
     env = json.loads((run_dir / "environment.json").read_text(encoding="utf-8"))
     console.print(f"狀態 [bold]{st.status}[/]（{st.end_reason or ('已暫停' if loop.paused else '—')}）")
-    if "violations" in env:
-        viol = env["violations"]
-        console.print(f"環境判定違規：{'[green]0[/]' if not any(viol.values()) else f'[red]{viol}[/]'}"
-                      f"（SimWeb 伺服器紀錄，本次執行期間）")
-    else:
-        console.print(f"請求：{env['requests_by_host']}（{escape(env['note'])}）", highlight=False)
+    console.print(f"請求：{env['requests_by_host']}（{escape(env['note'])}）", highlight=False)
     if st.report and st.report.get("headline"):
         console.print(f"[bold]結論[/]：{escape(st.report['headline'])}")
     console.print(f"時間軸：{run_dir / 'timeline.html'}")
@@ -431,18 +297,16 @@ def _execute(ectx, sim, *, step: bool, quiet: bool, verbose: bool, db_path: Path
         console.print("[yellow]限制[/]：" + "；".join(escape(x) for x in st.limitations))
 
 
-def _write_artifacts(ectx, sim) -> None:
-    from seo_intel.core.runner import write_artifacts
-
-    write_artifacts(ectx, sim)
-
-
 @research_app.callback(invoke_without_command=True)
 def research(
     typer_ctx: typer.Context,
-    scenario: Annotated[str | None, typer.Option("--scenario", "-s", help="情境 ID，例如 s1")] = None,
-    llm: LlmOpt = "live",
-    cassette: Annotated[Path | None, typer.Option(help="--llm replay 時使用的錄製檔")] = None,
+    site: Annotated[list[str] | None, typer.Option("--site", help="競品網址（可重複）")] = None,
+    keyword: Annotated[list[str] | None, typer.Option("--keyword", "-k", help="關鍵字（可重複）")] = None,
+    own_site: Annotated[str | None, typer.Option("--own-site", help="自家網址（選填）")] = None,
+    start: Annotated[str | None, typer.Option("--start", help="研究期間開始（YYYY-MM-DD，預設 90 天前）")] = None,
+    end: Annotated[str | None, typer.Option("--end", help="研究期間結束（預設今天）")] = None,
+    serp: Annotated[str, typer.Option("--serp", help="排名資料：none｜serpapi（需 SERPAPI_API_KEY）｜csv")] = "none",
+    serp_csv: Annotated[Path | None, typer.Option("--serp-csv", help="--serp csv 時的排名 CSV（關鍵字、排名、網址）")] = None,
     step: StepOpt = False,
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -452,69 +316,40 @@ def research(
     ablate: AblateOpt = "",
     max_fetches: MaxFetchesOpt = None,
     max_llm_usd: MaxLlmOpt = None,
-    seed: Annotated[int | None, typer.Option("--seed", help="SimWeb 世界種子（同樣的因果結構、不同的網址與雜訊）")] = None,
-    site: Annotated[list[str] | None, typer.Option("--site", help="真實網站：競品網址（可重複）")] = None,
-    keyword: Annotated[list[str] | None, typer.Option("--keyword", "-k", help="真實網站：關鍵字（可重複）")] = None,
-    own_site: Annotated[str | None, typer.Option("--own-site", help="真實網站：自家網址（選填）")] = None,
-    start: Annotated[str | None, typer.Option("--start", help="真實網站：研究期間開始（YYYY-MM-DD，預設 90 天前）")] = None,
-    end: Annotated[str | None, typer.Option("--end", help="真實網站：研究期間結束（預設今天）")] = None,
-    serp: Annotated[str, typer.Option("--serp", help="真實網站的排名資料：none｜serpapi（需 SERPAPI_API_KEY）｜csv")] = "none",
-    serp_csv: Annotated[Path | None, typer.Option("--serp-csv", help="--serp csv 時的排名 CSV（關鍵字、排名、網址）")] = None,
 ) -> None:
-    """執行一個研究 episode：SimWeb 情境（--scenario）或真實網站（--site 與 --keyword）。"""
+    """研究真實網站：競品在這些關鍵字做了什麼內容策略（使用真實 Opus，每次約 US$0.3）。"""
     if typer_ctx.invoked_subcommand:
         return
-    if site:
-        return _research_real(site, keyword or [], own_site, start, end, serp, serp_csv, llm=llm, step=step,
-                              quiet=quiet, verbose=verbose, path=path, memory=None if no_memory else (memory or _default_memory()),
-                              ablate=ablate, budget={"max_fetches": max_fetches, "max_llm_usd": max_llm_usd})
-    if scenario is None:
-        console.print("請指定 --scenario（例如 --scenario s1）、真實網站（--site 與 --keyword），"
+    if not site or not keyword:
+        console.print("請指定競品網址與關鍵字，例如：seo-intel research --site https://example.com --keyword 高山茶；"
                       "或使用 seo-intel research resume <episode>")
         raise typer.Exit(1)
-    from seo_intel.core.episode import RUNS_DIR, build_context, new_state
-    from seo_intel.core.runner import apply_run_config, scenario_task
-    from simweb import build
-
-    sim = build(scenario, seed=seed)
-    state = new_state(scenario_task(sim), sim.clock)
-    state.world_seed = seed
-    run_dir = RUNS_DIR / state.id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    cfg = _new_run_config(run_dir, None if no_memory else (memory or _default_memory()), ablate,
-                          {"max_fetches": max_fetches, "max_llm_usd": max_llm_usd})
-    settings, mem = apply_run_config(get_settings(), cfg)
-    ectx = build_context(state, settings, _make_llm(llm, settings, run_dir, cassette), sim.client(), sim.clock, run_dir,
-                         memory=mem)
-    _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
-
-
-def _research_real(sites, keywords, own_site, start, end, serp, serp_csv, *, llm, step, quiet, verbose, path, memory,
-                   ablate, budget) -> None:
     from seo_intel.core.runner import apply_run_config, prepare_real
 
     flags = sorted({x.strip().upper() for x in ablate.split(",") if x.strip()})
-    run_cfg = {"memory": {"path": str(memory) if memory else None, "ablate": flags},
+    if bad := set(flags) - {"M1", "M2"}:
+        raise typer.BadParameter(f"--ablate 只接受 M1、M2：{', '.join(sorted(bad))}")
+    mem_path = None if no_memory else (memory or _default_memory())
+    budget = {"max_fetches": max_fetches, "max_llm_usd": max_llm_usd}
+    run_cfg = {"memory": {"path": str(mem_path) if mem_path else None, "ablate": flags},
                "budget": {k: v for k, v in budget.items() if v is not None}}
     settings, mem = apply_run_config(get_settings(), run_cfg)
-    params = {"competitors": sites, "keywords": keywords, "own_site": own_site, "start": start, "end": end,
+    params = {"competitors": site, "keywords": keyword, "own_site": own_site, "start": start, "end": end,
               "serp_source": serp, "csv_path": str(serp_csv.resolve()) if serp_csv else None}
-    console.print("真實網站研究：只抓公開頁面、遵守 robots.txt 與抓取間隔；開始前會請求一次首頁以確認正式網域。")
+    console.print("只抓公開頁面、遵守 robots.txt 與抓取間隔；開始前會請求一次首頁以確認正式網域。")
     try:
-        ectx = prepare_real(params, settings, lambda run_dir: _make_llm(llm, settings, run_dir, None), memory=mem,
-                            run_cfg=run_cfg)
+        ectx = prepare_real(params, settings, lambda run_dir: _make_llm(settings, run_dir), memory=mem, run_cfg=run_cfg)
     except ValueError as e:
         console.print(f"[red]{escape(str(e))}[/]")
         if mem:
             mem.store.close()
         raise typer.Exit(1) from None
-    _execute(ectx, None, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
+    _execute(ectx, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
 
 
 @research_app.command("resume")
 def research_resume(
     episode_id: Annotated[str, typer.Argument(help="Episode ID")],
-    llm: LlmOpt = "live",
     step: StepOpt = False,
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -535,7 +370,7 @@ def research_resume(
         console.print(f"Episode 已結束（{state.status}），無需續跑")
         raise typer.Exit(0)
     settings, mem = apply_run_config(get_settings(), load_run_config(run_dir))
-    ectx, sim = resume_context(run_dir, settings, lambda d: _make_llm(llm, settings, d, None), mem)
+    ectx = resume_context(run_dir, settings, lambda d: _make_llm(settings, d), mem)
     try:
         notes = approvals.resume(ectx)
     except approvals.ApprovalPending as e:
@@ -544,7 +379,7 @@ def research_resume(
             mem.store.close()
         raise typer.Exit(1) from None
     truncate_trace(run_dir / "trace.jsonl", ectx.state.seq)
-    _execute(ectx, sim, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=True, notes=notes)
+    _execute(ectx, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=True, notes=notes)
 
 
 # ---------- 檢視研究過程 ----------
@@ -564,14 +399,25 @@ def trace_list() -> None:
     """列出所有 episode。"""
     from seo_intel.core.episode import RUNS_DIR, load_checkpoint
 
-    t = Table("Episode", "情境", "狀態", "結束原因", "步驟", "抓取", "LLM US$", title="研究 episode")
+    from pydantic import ValidationError
+
+    t = Table("Episode", "網站｜關鍵字", "狀態", "結束原因", "步驟", "抓取", "LLM US$", title="研究 episode")
+    legacy = 0
     for d in sorted(RUNS_DIR.glob("E-*"), reverse=True):
         if not (d / "checkpoint.json").is_file():
             continue
-        st, _ = load_checkpoint(d)
-        t.add_row(st.id, st.task.scenario or "—", st.status, st.end_reason or "—", str(st.seq),
+        try:
+            st, _ = load_checkpoint(d)
+        except ValidationError:
+            st = None
+        if st is None or not st.task.keywords:   # 舊版的模擬情境 episode（模擬世界已移除）
+            legacy += 1
+            continue
+        t.add_row(st.id, st.task.label, st.status, st.end_reason or "—", str(st.seq),
                   str(st.budget.fetches), f"{st.budget.llm_usd:.4f}")
     console.print(t)
+    if legacy:
+        console.print(f"[dim]另有 {legacy} 個舊版模擬情境的 episode（已無法開啟，可刪除 runs/ 下對應資料夾）[/]")
 
 
 @trace_app.command("show")
@@ -667,7 +513,7 @@ def memory_stats(limit: Annotated[int, typer.Option(help="列出幾筆 M2 統計
         t.add_row(LABEL.get(r["scope"], r["scope"]), r["key"], f"{r['alpha']:g}", f"{r['beta']:g}", f"{r['mean']:.2f}",
                   str(r["episodes"]))
     console.print(t)
-    o = Table("Episode", "情境", "成功", "人工糾偏", "抓取", "API", "LLM US$", "套用經驗", title="Episode 成效")
+    o = Table("Episode", "網站｜關鍵字", "成功", "人工糾偏", "抓取", "API", "LLM US$", "套用經驗", title="Episode 成效")
     for r in store.conn.execute("SELECT * FROM episode_outcomes ORDER BY ts"):
         o.add_row(r["episode_id"], r["scenario"] or "—", "✓" if r["success"] else "✗", "是" if r["corrected"] else "",
                   str(r["fetches"]), str(r["api_calls"]), f"{r['llm_usd']:.4f}", ", ".join(json.loads(r["lessons_json"])))
@@ -701,69 +547,6 @@ def memory_retire(
     store.event(x.id, None, "retired", x.retired_reason)
     store.close()
     console.print(f"已淘汰 {lesson_id}：{reason}")
-
-
-# ---------- 評測 ----------
-
-EST_LIVE_USD_PER_EPISODE = 0.35   # Phase 3 實測：真實 Opus 每個 episode 約 US$0.31–0.32
-
-
-@eval_app.command("protocol")
-def eval_protocol(
-    llm: Annotated[str, typer.Option("--llm", help="fake（免費、確定性）或 live（真實 API，需 --max-usd）")] = "fake",
-    seeds: Annotated[int, typer.Option(help="每個測試情境的種子數")] = 3,
-    test_offset: Annotated[int, typer.Option(help="測試集種子位移（用從沒看過的世界做獨立驗證）")] = 0,
-    out: Annotated[Path | None, typer.Option(help="輸出目錄（預設 evals/reports/<時間>-<llm>）")] = None,
-    max_usd: Annotated[float | None, typer.Option("--max-usd", help="真實 LLM 的花費上限；超過即中止")] = None,
-    quick: Annotated[bool, typer.Option("--quick", help="只跑 Day 1 / 訓練 / Day N（不跑消融與緊縮預算）")] = False,
-) -> None:
-    """完整評測：Day 1 → 訓練（含腳本化的人工糾偏）→ Day N → 消融 → 緊縮預算，產出 report.md。"""
-    from datetime import datetime
-
-    from seo_intel.evals.report import render
-    from seo_intel.evals.runner import BudgetExceeded, EvalConfig, protocol, save, splits
-
-    settings = get_settings()
-    sp = splits()
-    n_test, n_train = len(sp["test"]) * seeds, len(sp["train"]) * seeds
-    n_eps = n_test + n_train + (0 if quick else n_test * 2 + n_test * 4)
-    if llm == "live":
-        est = n_eps * EST_LIVE_USD_PER_EPISODE
-        console.print(f"預估 {n_eps} 個 episode、約 US${est:.0f}（每個 episode 約 US${EST_LIVE_USD_PER_EPISODE}）")
-        if max_usd is None:
-            console.print("[red]真實 LLM 評測必須指定 --max-usd（花費上限，超過即中止）[/]")
-            raise typer.Exit(1)
-    elif llm != "fake":
-        raise typer.BadParameter("--llm 只接受 fake 或 live")
-    out = out or PROJECT_ROOT / "evals" / "reports" / f"{datetime.now():%Y%m%d-%H%M%S}-{llm}"
-    cfg = EvalConfig(out_dir=out, seeds=seeds, test_offset=test_offset, max_usd=max_usd,
-                     ablations=() if quick else ("M1", "M2"), tight_budgets=() if quick else (20, 30),
-                     progress=lambda m: console.print(escape(m), highlight=False))
-    reflector = _make_llm("fake", settings, out, None) if llm == "fake" else None
-    if llm == "live":
-        from seo_intel.llm import AnthropicLLM, RecordingLLM
-
-        reflector = RecordingLLM(AnthropicLLM(settings.models), out / "reflector_cassette.jsonl")
-    meta = {"name": out.name, "llm": llm, "seeds": seeds, "test_offset": test_offset, "on_approval": cfg.on_approval,
-            "test": [x for x, _ in sp["test"]], "train": [x for x, _ in sp["train"]]}
-    try:
-        ev = protocol(settings, lambda run_dir: _make_llm(llm, settings, run_dir, None), cfg, reflector)
-    except BudgetExceeded as e:
-        console.print(f"[red]{escape(str(e))}[/]")
-        raise typer.Exit(1) from None
-    path = save(ev, cfg, meta)
-    (out / "report.md").write_text(render(json.loads(path.read_text(encoding="utf-8")), out), encoding="utf-8")
-    console.print(f"\n報告：{out / 'report.md'}\n原始結果：{path}\n每個 episode 的時間軸：{out / 'runs'}")
-
-
-@eval_app.command("report")
-def eval_report(out: Annotated[Path, typer.Argument(help="評測輸出目錄")]) -> None:
-    """依 results.json 重新產生 report.md。"""
-    from seo_intel.evals.report import render
-
-    results = json.loads((out / "results.json").read_text(encoding="utf-8"))
-    (out / "report.md").write_text(render(results, out), encoding="utf-8")
-    console.print(f"已產生：{out / 'report.md'}")
 
 
 # ---------- 人工核准 ----------
@@ -855,7 +638,7 @@ def feedback_correct(
     claim: Annotated[str, typer.Option("--claim", help="主張 ID，例如 C1")],
     verdict: Annotated[str, typer.Option("--verdict", help="correct｜wrong｜partial")],
     reason: Annotated[str, typer.Option("--reason", help="為什麼（會被轉成經驗，影響之後的研究）")],
-    llm: Annotated[str, typer.Option("--llm", help="live：用 reflector 角色把理由轉成經驗；fake：關鍵字規則（免費）")] = "live",
+    no_llm: Annotated[bool, typer.Option("--no-llm", help="不呼叫 LLM：只保存理由原文（不產生程式套用的偏置）")] = False,
     memory: MemoryOpt = None,
     path: DbPath = DEFAULT_DB,
 ) -> None:
@@ -872,16 +655,10 @@ def feedback_correct(
     state, _ = load_checkpoint(run_dir)
     settings = get_settings()
     client = None
-    if verdict != "correct" and llm == "fake":
-        from seo_intel.llm.fake_planner import fake_llm
-
-        client = fake_llm(settings.models)
-    elif verdict != "correct" and llm == "live":
+    if verdict != "correct" and not no_llm:   # 用 reflector 角色把理由轉成程式可套用的偏置
         from seo_intel.llm import AnthropicLLM, RecordingLLM
 
         client = RecordingLLM(AnthropicLLM(settings.models), run_dir / "feedback_cassette.jsonl")
-    elif verdict != "correct":
-        raise typer.BadParameter("--llm 只接受 live 或 fake")
     store = _store(memory)
     try:
         res = correct(store, state, claim, verdict, reason, client)
