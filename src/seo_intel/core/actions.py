@@ -6,6 +6,7 @@ SELECT_ACTION 會把前幾名連同分數明細寫入 trace，讓人看得到「
 
 from __future__ import annotations
 
+from seo_intel.core import profiles
 from seo_intel.core.context import EpisodeContext
 from seo_intel.core.frontier import Entry, template_key
 from seo_intel.core.models import DISCOVERY_KINDS, Action, InfoNeed, Phase
@@ -51,6 +52,17 @@ def _discovery(ctx: EpisodeContext) -> list[Action]:
                 out.append(Action(tool="discover", args={"domain": d}, need_id=n.id, phase=Phase.DISCOVERY,
                                   score=round(b + bonus, 3), breakdown={"priority": b, "focus": bonus},
                                   reason=f"回答 {n.id}：從 robots 與 sitemap 取得 {d} 的頁面範本與更新時間"))
+        elif n.kind == "backlink_profile" and ctx.backlinks is not None:
+            out.append(Action(tool="backlinks", args={"need": n.id, "domains": n.target_domains}, need_id=n.id,
+                              phase=Phase.DISCOVERY, score=b, breakdown={"priority": b},
+                              reason=f"回答 {n.id}：讀取使用者提供的反向連結資料（本機檔案，不連網）"))
+        elif n.kind == "own_site_profile":
+            inventoried = {o.data["domain"] for o in st.observations if o.kind == "site_inventory"}
+            for d in n.target_domains:
+                if d not in inventoried:
+                    out.append(Action(tool="discover", args={"domain": d}, need_id=n.id, phase=Phase.DISCOVERY,
+                                      score=round(b - 0.05, 3), breakdown={"priority": b, "cost": -0.05},
+                                      reason=f"回答 {n.id}：取得自家 {d} 的頁面清單，之後量測主題頁"))
     return out
 
 
@@ -125,7 +137,7 @@ def _fetching(ctx: EpisodeContext, phase: Phase) -> list[Action]:
 def generate(ctx: EpisodeContext, phase: Phase) -> list[Action]:
     done = set(ctx.state.done_signatures)
     cands = _discovery(ctx) if phase == Phase.DISCOVERY else \
-        _fetching(ctx, phase) if phase in (Phase.SAMPLING, Phase.TARGETED) else []
+        profiles.candidates(ctx, phase) + _fetching(ctx, phase) if phase in (Phase.SAMPLING, Phase.TARGETED) else []
     unique: dict[str, Action] = {}
     for a in cands:
         if a.signature not in done and a.signature not in unique:
@@ -151,8 +163,13 @@ def focus_satisfied(ctx: EpisodeContext) -> str | None:
 
 def compute_phase(ctx: EpisodeContext) -> Phase:
     st, ledger = ctx.state, ctx.ledger
-    if any(n.kind in DISCOVERY_KINDS for n in _open(ctx)) and generate(ctx, Phase.DISCOVERY):
+    if any(n.kind in DISCOVERY_KINDS or n.kind == "own_site_profile" for n in _open(ctx)) \
+            and generate(ctx, Phase.DISCOVERY):
         return Phase.DISCOVERY
+    if any(a.signature not in st.done_signatures for a in profiles.candidates(ctx, Phase.SAMPLING)):
+        for phase in (Phase.SAMPLING, Phase.TARGETED):   # 三個問題的證據：排名頁、對比頁、自家頁優先
+            if ledger.fetch_room(phase) > 0:
+                return phase
     if page_change_domains(ctx):
         skip_broad = focus_satisfied(ctx)
         if skip_broad and ledger.fetch_room(Phase.TARGETED) > 0 and generate(ctx, Phase.TARGETED):

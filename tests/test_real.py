@@ -205,3 +205,41 @@ def test_research_records_strategy_measurements(settings, tmp_path, monkeypatch)
     assert "期間內新採用：" in diffs[0].summary
     lines = [d for rec in read_trace(r.ctx.run_dir / "trace.jsonl") for d in rec.details if d.startswith("策略量測：")]
     assert lines
+
+
+def test_research_builds_three_profiles(settings, tmp_path, monkeypatch):
+    """排名頁輪廓（對比同網站其他主題頁）、自家網站輪廓、反向連結輪廓：都由程式量測，並進入給 LLM 的摘要。"""
+    from seo_intel.core.digest import observation_digest
+    from seo_intel.llm.types import LLMFatalError
+
+    class NoLLM:
+        def call(self, role, *, system, user, schema):
+            raise LLMFatalError("不呼叫 LLM")
+
+    links = tmp_path / "links.csv"
+    links.write_text("Referring page URL,Target URL,Anchor,First seen\n"
+                     + "".join(f"https://ref{i}.example.com/p,https://{realsite.SITE}{realsite.GUIDE[i % 4]},高山茶推薦,2026-09-0{i + 1}\n"
+                               for i in range(5))
+                     + f"https://old.example.com/p,https://{realsite.SITE}/,茶葉專賣,2025-03-01\n"
+                     + f"https://fan.example.com/p,https://{realsite.OWN}/,自家茶園,2025-05-01\n", encoding="utf-8")
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    log: list[str] = []
+    r = run_real({"competitors": [realsite.SITE], "keywords": realsite.KEYWORDS, "serp_source": "serpapi",
+                  "own_site": realsite.OWN, "backlink_paths": [str(links)]},
+                 settings, lambda d: NoLLM(), run_root=tmp_path / "runs", client=realsite.client(log), clock=TestClock(),
+                 today=TODAY, history=tmp_path / "h.jsonl")
+    st = r.state
+    needs = {n.kind: n.status for n in st.info_needs}
+    assert needs["ranking_pages"] == needs["own_site_profile"] == needs["backlink_profile"] == "resolved"
+    ranking = next(o for o in st.observations if o.kind == "onpage_profile")
+    faq = next(c for c in ranking.data["contrast"] if c["dimension"] == "schema_faq")
+    assert ranking.data["n_ranking"] >= 3 and faq["group"] == 1.0 and ranking.data["n_others"] >= 3
+    assert ranking.data["n_diffed"] >= 1 and "schema_faq" in ranking.data["adopted_in_window"]
+    own = next(o for o in st.observations if o.kind == "own_profile")
+    assert own.data["n"] >= 3 and own.data["profile"]["schema_faq"] == 0 and own.data["ranking_urls"]
+    link = {o.data["site"]: o.data for o in st.observations if o.kind == "link_profile"}
+    assert link[realsite.SITE]["new_ref_domains_in_window"] == 5 and link[realsite.SITE]["anchor_share"]["keyword"] > 0.5
+    assert link[realsite.OWN]["own"] and link[realsite.OWN]["new_ref_domains_in_window"] == 0
+    kinds = {p["kind"] for p in observation_digest(r.ctx)["strategy_profiles"]}
+    assert kinds == {"onpage_profile", "own_profile", "link_profile"}
+    assert any(realsite.OWN in u for u in log) and not any("/cart" in u for u in log)

@@ -36,9 +36,10 @@ class Phase(StrEnum):
 
 PHASE_ORDER = (Phase.DISCOVERY, Phase.SAMPLING, Phase.TARGETED, Phase.VERIFICATION)
 
-InfoKind = Literal["rank_change", "control_check", "serp_competitors", "site_inventory", "page_changes"]
-DISCOVERY_KINDS = frozenset({"rank_change", "control_check", "serp_competitors", "site_inventory"})
-ToolName = Literal["serp_scan", "discover", "fetch", "history_diff"]
+InfoKind = Literal["rank_change", "control_check", "serp_competitors", "site_inventory", "page_changes",
+                   "ranking_pages", "backlink_profile", "own_site_profile"]
+DISCOVERY_KINDS = frozenset({"rank_change", "control_check", "serp_competitors", "site_inventory", "backlink_profile"})
+ToolName = Literal["serp_scan", "discover", "fetch", "history_diff", "backlinks"]
 
 
 class TaskInput(BaseModel):
@@ -70,7 +71,7 @@ class TaskInput(BaseModel):
 
 class ResearchGoal(BaseModel):
     restated_question: str
-    goal_type: Literal["ranking_drop_cause", "competitor_content_strategy", "other"]
+    goal_type: Literal["competitive_strategy", "ranking_drop_cause", "competitor_content_strategy", "other"]
     topic_keywords: list[str]
     focus_domains: list[str]
     window_start: date

@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import date, timedelta
 from urllib.parse import urlsplit
 
-from seo_intel.core import approvals, beliefs, probes, strategy
+from seo_intel.core import approvals, beliefs, probes, profiles, strategy
 from seo_intel.core.actions import COMPONENT_LABELS, compute_phase, focus_satisfied, generate
 from seo_intel.core.claims import confounder_note, derive_claims, render_markdown, validate_citations
 from seo_intel.core.context import EpisodeContext, StepOutcome, llm_record
@@ -42,6 +42,7 @@ from seo_intel.llm.roles import (
     verifier_prompt,
 )
 from seo_intel.llm.types import LLMError
+from seo_intel.real.backlinks import link_profile
 from seo_intel.tools.extract import PageFeatures, looks_like_instructions, redact_instructions
 from seo_intel.tools.history import history_diff
 from seo_intel.tools.text import tokens
@@ -55,7 +56,14 @@ MAX_KEYWORD_WORDS = 8
 MAX_ACTION_ATTEMPTS = 2
 REAL_UNAVAILABLE = {"rank_change", "control_check"}
 UNAVAILABLE_WHY = {"rank_change": "沒有排名歷史", "control_check": "沒有非主題查詢的排名資料",
-                   "serp_competitors": "沒有設定排名資料來源"}
+                   "serp_competitors": "沒有設定排名資料來源", "backlink_profile": "沒有提供反向連結 CSV",
+                   "own_site_profile": "沒有提供自家網址"}
+GOAL_TYPE = "competitive_strategy"
+FIXED_CRITERIA = [
+    "On-page：指出競品有排名的頁面普遍採用、而同網站其他主題頁較少採用的做法，每項附量測與統計檢定",
+    "Off-page：以反向連結資料說明競品的連結成長、錨點文字與連結指向（沒有資料時明確說明無法研究）",
+    "優先行動：依影響、自家網站的差距與實作難度排序（沒有自家網站時說明無法比較差距）",
+]
 _TRANSIENT = re.compile(r"timeout|connect_error|http_5[0-9][0-9]|http_429")
 
 
@@ -119,9 +127,10 @@ def normalize_goal(out: GoalOut | None, task: TaskInput) -> tuple[ResearchGoal, 
     hint = task.period_hint or (task.today - timedelta(days=90), task.today)
     if out is None:
         notes.append("LLM 未產生目標，改用任務文字的確定性預設")
-        return ResearchGoal(restated_question=task.question, goal_type="other",
-                            topic_keywords=_fallback_keywords(task), focus_domains=task.competitors,
-                            window_start=hint[0], window_end=hint[1], success_criteria=[]), notes
+        keywords = [k.lower() for k in task.keywords] or _fallback_keywords(task)
+        return ResearchGoal(restated_question=task.question, goal_type=GOAL_TYPE, topic_keywords=keywords,
+                            focus_domains=task.competitors, window_start=hint[0], window_end=hint[1],
+                            success_criteria=list(FIXED_CRITERIA)), notes
 
     def parse(raw: str, fallback: date, label: str) -> date:
         try:
@@ -150,13 +159,12 @@ def normalize_goal(out: GoalOut | None, task: TaskInput) -> tuple[ResearchGoal, 
     focus = [d for d in out.focus_domains if d in task.competitors]
     if len(focus) != len(out.focus_domains):
         notes.append("已移除不在任務競品清單中的焦點網域")
-    goal_type = out.goal_type
-    if goal_type == "ranking_drop_cause":
-        goal_type = "competitor_content_strategy"
-        notes.append("真實網站沒有排名歷史，無法診斷排名下滑原因；改為研究競品的內容策略")
-    return ResearchGoal(restated_question=out.restated_question, goal_type=goal_type,
+    if out.goal_type != GOAL_TYPE:   # 研究目標固定為三個問題；排名下滑原因在真實網站上也無法診斷（沒有排名歷史）
+        notes.append(f"研究目標固定為競爭策略的三個問題（LLM 提出的類型 {out.goal_type} 不採用）")
+    criteria = FIXED_CRITERIA + [c for c in out.success_criteria if c not in FIXED_CRITERIA]
+    return ResearchGoal(restated_question=out.restated_question, goal_type=GOAL_TYPE,
                         topic_keywords=keywords, focus_domains=focus or task.competitors,
-                        window_start=ws, window_end=we, success_criteria=out.success_criteria), notes
+                        window_start=ws, window_end=we, success_criteria=criteria), notes
 
 
 def memory_setup(ctx: EpisodeContext) -> list[str]:
@@ -202,8 +210,10 @@ def define_goal(ctx: EpisodeContext) -> StepOutcome:
 # ---------- PLAN_INFO_NEEDS ----------
 
 def unavailable_kinds(task: TaskInput) -> set[str]:
-    """真實網站拿不到的資料需求：沒有排名歷史；沒有設定排名來源時也沒有目前的 SERP。"""
-    return REAL_UNAVAILABLE | ({"serp_competitors"} if task.serp_source == "none" else set())
+    """拿不到的資料需求：真實網站沒有排名歷史；沒有排名來源就沒有 SERP；沒有反向連結 CSV、自家網址也一樣。"""
+    return (REAL_UNAVAILABLE | ({"serp_competitors"} if task.serp_source == "none" else set())
+            | ({"backlink_profile"} if task.backlink_source == "none" or not task.backlink_domains else set())
+            | ({"own_site_profile"} if not task.own_site else set()))
 
 
 def normalize_plan(out: PlanOut | None, task: TaskInput, goal: ResearchGoal) -> tuple[list[InfoNeed], list[str]]:
@@ -219,8 +229,12 @@ def normalize_plan(out: PlanOut | None, task: TaskInput, goal: ResearchGoal) -> 
         targets = [d for d in raw.target_domains if d in task.allowed_domains]
         if raw.kind == "control_check":
             targets = [own]
-        if raw.kind in ("site_inventory", "page_changes"):
+        if raw.kind in ("site_inventory", "page_changes", "ranking_pages"):
             targets = [d for d in targets if d in comps]
+        if raw.kind == "backlink_profile":
+            targets = list(task.backlink_domains)       # 只有 CSV 裡有資料的網站
+        if raw.kind == "own_site_profile":
+            targets = [own]
         if not targets:
             targets = goal.focus_domains
             notes.append(f"{raw.kind} 未指定有效網域，改用 {', '.join(targets)}")
@@ -231,11 +245,19 @@ def normalize_plan(out: PlanOut | None, task: TaskInput, goal: ResearchGoal) -> 
         needs.append(InfoNeed(id=f"N{len(needs) + 1}", kind=raw.kind, question=raw.question, target_domains=targets,
                               answer_criteria=raw.answer_criteria, priority=min(5, max(1, raw.priority)),
                               must_answer=raw.must_answer))
-    # 沒有排名歷史：網站盤點、頁面變化與（有來源時）目前 SERP 是必要的證據
+    # 三個問題的必要證據：網站盤點、排名頁輪廓、頁面變化；有資料時加上 SERP、反向連結與自家網站
+    ranking_q = ("競品有排名的頁面採取了哪些做法？和同網站其他主題頁比有什麼不同？" if task.serp_source != "none"
+                 else "競品的主題頁採取了哪些做法？（沒有排名資料，無法區分哪些頁面有排名）")
     essentials = {"site_inventory": (goal.focus_domains, 1, "競品有哪些頁面範本，哪些近期有更新？"),
-                  "page_changes": (goal.focus_domains, 2, "競品在這些關鍵字相關的頁面做了什麼？")}
+                  "ranking_pages": (goal.focus_domains, 1, ranking_q),
+                  "page_changes": (goal.focus_domains, 2, "競品在這些關鍵字相關的頁面，研究期間內做了什麼改變？")}
     if task.serp_source != "none":
         essentials["serp_competitors"] = (comps, 1, "這些關鍵字目前誰排在前面、排的是哪些頁面？")
+    if "backlink_profile" not in unavailable:
+        essentials["backlink_profile"] = (list(task.backlink_domains), 2,
+                                          "競品（與自家）的反向連結：研究期間新增了多少引用網域、錨點文字與連結指向？")
+    if "own_site_profile" not in unavailable:
+        essentials["own_site_profile"] = ([own], 3, "自家主題頁在同一套做法上的狀態如何？（用來計算差距）")
     for kind, (targets, prio, question) in essentials.items():
         if not any(n.kind == kind for n in needs):
             needs.append(InfoNeed(id=f"N{len(needs) + 1}", kind=kind, question=question, target_domains=targets,
@@ -252,8 +274,9 @@ def plan_info_needs(ctx: EpisodeContext) -> StepOutcome:
     applied = []
     if ctx.memory is not None:   # M1 偏置：調整資訊需求優先序，缺少時補上
         own, focus = st.task.own_site, st.goal.focus_domains
-        default_targets = {"serp_competitors": st.task.competitors,
-                           "site_inventory": focus, "page_changes": focus}
+        default_targets = {"serp_competitors": st.task.competitors, "site_inventory": focus, "page_changes": focus,
+                           "ranking_pages": focus, "backlink_profile": list(st.task.backlink_domains),
+                           "own_site_profile": [own]}
         for lesson, b in ctx.memory.biases("info_need_priority"):
             if b.kind in unavailable_kinds(st.task):
                 continue
@@ -450,8 +473,8 @@ def execute_tool(ctx: EpisodeContext) -> StepOutcome:
     t0 = ctx.clock.now()
     summary = a.label()
     try:
-        if a.tool == "serp_scan":
-            raw = ctx.rank.serp_snapshot(st.task.keywords or st.goal.topic_keywords, st.task.competitors)
+        if a.tool == "serp_scan":   # 競品與自家：自家在 SERP 上的頁面也是差距比較的依據
+            raw = ctx.rank.serp_snapshot(st.task.keywords or st.goal.topic_keywords, st.task.allowed_domains)
             summary = f"serp_scan {len(raw['queries'])} 個關鍵字（{raw['source']}，{raw['after']}）"
         elif a.tool == "discover":
             raw = discover(ctx.http, a.args["domain"])
@@ -461,6 +484,14 @@ def execute_tool(ctx: EpisodeContext) -> StepOutcome:
             raw = {"result": res, "features": feats}
             status = res.status if res.status is not None else res.error
             summary = f"fetch {_short(a.args['url'])} → {status}" + ("（快取）" if res.from_cache else "")
+        elif a.tool == "backlinks":   # 本機檔案（使用者上傳的 CSV），不連網
+            if ctx.backlinks is None:
+                raise RuntimeError("沒有反向連結資料")
+            ranking = {u for d in st.task.allowed_domains for u in profiles.serp_urls(ctx, d)}
+            raw = {"profiles": {d: link_profile(ctx.backlinks.for_site(d), d, _window(ctx),
+                                                st.task.keywords or st.goal.topic_keywords, ranking)
+                                for d in a.args["domains"] if ctx.backlinks.for_site(d)}}
+            summary = f"backlinks {len(raw['profiles'])} 個網站（{'、'.join(ctx.backlinks.files)}）"
         elif a.tool == "history_diff":
             url = a.args["url"]
             info = st.fetched[url]
@@ -543,6 +574,14 @@ def _parse_serp(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
     out.details.append(f"競品中的上升者：{', '.join(st.serp_gainers) or '無'}；加入 {added} 個 SERP 網址到 frontier")
     for need in st.needs_of("serp_competitors"):
         _resolve(need, summary, out)
+    profiles.check(ctx, out)
+
+
+def _parse_backlinks(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
+    need = ctx.state.need(ctx.state.pending.need_id)
+    if need is not None:
+        profiles.link_profiles(ctx, need, raw, out)
+    out.summary = f"反向連結輪廓：{len(raw['profiles'])} 個網站"
 
 
 def _parse_discover(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
@@ -581,6 +620,7 @@ def _parse_discover(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
         done = {o.data["domain"] for o in st.observations if o.kind == "site_inventory"}
         if set(need.target_domains) <= done:
             _resolve(need, f"已取得 {', '.join(need.target_domains)} 的範本清單", out)
+    profiles.check(ctx, out)
 
 
 def _on_topic(ctx: EpisodeContext, text: str) -> bool:
@@ -648,6 +688,7 @@ def _parse_fetch(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
     if f.malformed:
         out.details.append("HTML 不完整：已解析可用的部分")
     _check_page_changes(ctx, out)
+    profiles.check(ctx, out)
 
 
 def _parse_history(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
@@ -692,7 +733,7 @@ def parse_result(ctx: EpisodeContext) -> StepOutcome:
     else:
         try:
             {"serp_scan": _parse_serp, "discover": _parse_discover, "fetch": _parse_fetch,
-             "history_diff": _parse_history}[st.pending.tool](ctx, raw, out)
+             "history_diff": _parse_history, "backlinks": _parse_backlinks}[st.pending.tool](ctx, raw, out)
         except Exception as e:   # F3：解析失敗（例如資料格式異常）只影響這一筆結果
             obs = st.add_observation("tool_error", f"{st.pending.label()} 結果無法解析：{type(e).__name__}: {e}",
                                      {"error": f"{type(e).__name__}: {e}"}, need_id=st.pending.need_id)
@@ -719,6 +760,8 @@ STRENGTH_ZH = {"weak": "弱", "moderate": "中", "strong": "強"}
 
 def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
+    pre = StepOutcome(summary="")
+    profiles.check(ctx, pre, force=True)   # 輪廓還沒寫出（例如抓取預算或候選頁用完）：以目前的資料寫出，假設才看得到
     st.hypothesis_round += 1
     st.seek_rounds = 0
     digest = observation_digest(ctx)
@@ -727,7 +770,7 @@ def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
     user = hypotheses_prompt(st.task, st.goal, digest, refuted, ctx.scratch.get("hypothesis_lessons"))
     out, records, error = _call_llm(ctx, "hypothesizer", user, HypothesesOut, system=HYPOTHESIZER_SYSTEM)
     known = set(digest["known_templates"])
-    details, new = [], []
+    details, new = list(pre.details), []
     for raw in (out.hypotheses[:4] if out else []):
         fields, reason = beliefs.validate({
             "category": raw.category, "statement": raw.statement, "subject_site": raw.subject_site,
@@ -761,7 +804,7 @@ def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
     return StepOutcome(summary=f"第 {st.hypothesis_round} 輪：提出 {n_ok} 個可檢驗的假設（拒收 {len(new) - n_ok} 個）",
                        details=details, decision={"round": st.hypothesis_round,
                                                   "hypotheses": [h.model_dump(mode="json") for h in new]},
-                       llm=records, reason=error)
+                       llm=records, reason=error, observations=pre.observations)
 
 
 # ---------- SEEK_EVIDENCE ----------
@@ -951,6 +994,7 @@ def decide_next(ctx: EpisodeContext) -> StepOutcome:
                     ctx.memory.mark(st, lesson, "early_hypotheses")
                     out.lessons_applied.append(lid)
         if no_candidates:
+            profiles.check(ctx, out, force=True)   # 沒有可抓的頁面了：用目前的資料寫出輪廓
             why = ("定向抓取額度已用完（剩餘額度保留給驗證）" if st.phase == Phase.VERIFICATION
                    else f"階段 {st.phase.value} 沒有可執行的行動")
             for n in [n for n in st.info_needs if n.status == "open"]:

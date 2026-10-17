@@ -7,7 +7,8 @@ from typing import Literal
 from pydantic import BaseModel, model_validator
 
 BiasType = Literal["avoid_path", "sampling_focus", "info_need_priority", "hypothesis_prior", "skip_costly_probes"]
-NEED_KINDS = {"rank_change", "control_check", "serp_competitors", "site_inventory", "page_changes"}
+NEED_KINDS = {"rank_change", "control_check", "serp_competitors", "site_inventory", "page_changes",
+              "ranking_pages", "backlink_profile", "own_site_profile"}
 CATEGORIES = {"competitor_content_change", "competitor_new_pages", "sitewide_factor", "own_site_change", "other"}
 
 

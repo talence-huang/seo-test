@@ -148,6 +148,8 @@ def check_serp(env: dict) -> None:
 
 
 def tools_factory(env: dict, today: date, history: Path = SERP_HISTORY) -> Callable[[HttpToolkit], tuple]:
+    backlinks = load_backlinks(env)   # 本機檔案：建立時讀一次（續跑時依 run.json 的路徑重讀）
+
     def make(http: HttpToolkit) -> tuple:
         src = env["serp_source"]
         provider = None
@@ -155,5 +157,5 @@ def tools_factory(env: dict, today: date, history: Path = SERP_HISTORY) -> Calla
             provider = SerpApiProvider(http, os.environ.get("SERPAPI_API_KEY", ""))
         elif src == "csv":
             provider = CsvProvider.from_path(Path(env["csv_path"]))
-        return RealRankClient(provider, today, SerpHistory(history)), WaybackClient(http)
+        return RealRankClient(provider, today, SerpHistory(history)), WaybackClient(http), backlinks
     return make

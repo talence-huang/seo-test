@@ -2,6 +2,7 @@
 
 真相：tea.example.tw 在 8–9 月改版 /guide/ 下的高山茶指南（字數大幅增加、加入 FAQPage），並新增 4 篇；
 /blog/ 是一年前的舊文章，/tag/ 是背景變動。SERP 上排名的是 /guide/ 頁面。
+自家網站 own-tea.tw：/cha/ 下 6 篇高山茶文章，短、沒有 FAQ；SERP 第 9 名是其中一篇。
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import httpx
 
 SITE = "tea.example.tw"
 OTHER = "other-tea.tw"
+OWN = "own-tea.tw"
+OWN_PAGES = [f"/cha/{quote(f'高山茶-入門-{i}')}/" for i in range(6)]
 KEYWORDS = ["高山茶", "烏龍茶"]
 GUIDE = [f"/guide/{quote(f'高山茶-指南-{i}')}/" for i in range(12)]
 NEW_GUIDES = set(GUIDE[8:])
@@ -72,6 +75,18 @@ def handler(log: list[str]):
             if path == "/":
                 return httpx.Response(200, text=page("茶葉專賣", 2, "2020-01-01", "2026-01-01"))
             return httpx.Response(404, text="not found")
+        if host == OWN:
+            if path == "/robots.txt":
+                return httpx.Response(200, text=f"User-agent: *\nSitemap: https://{OWN}/sitemap.xml\n")
+            if path == "/sitemap.xml":
+                return httpx.Response(200, text="<urlset>" + "".join(
+                    f"<url><loc>https://{OWN}{p}</loc><lastmod>2025-12-01</lastmod></url>" for p in OWN_PAGES) + "</urlset>")
+            raw = u.raw_path.decode().split("?")[0]
+            if raw in OWN_PAGES:
+                return httpx.Response(200, text=page(f"高山茶入門 {OWN_PAGES.index(raw)}", 6, "2025-06-01", "2025-12-01"))
+            if path == "/":
+                return httpx.Response(200, text=page("自家茶園", 2, "2020-01-01", "2025-01-01"))
+            return httpx.Response(404, text="not found")
         if host == "web.archive.org" and path == "/cdx/search/cdx":
             target = parse_qs(u.query.decode())["url"][0]
             tpath = urlsplit(target).path
@@ -88,7 +103,8 @@ def handler(log: list[str]):
                        {"position": 2, "link": f"https://{SITE}{GUIDE[0]}"},
                        {"position": 3, "link": f"https://{SITE}{GUIDE[1]}"},
                        {"position": 4, "link": f"https://{OTHER}/b"},
-                       {"position": 5, "link": f"https://{SITE}{GUIDE[3]}"}]
+                       {"position": 5, "link": f"https://{SITE}{GUIDE[3]}"},
+                       {"position": 9, "link": f"https://{OWN}{OWN_PAGES[0]}"}]
             return httpx.Response(200, json={"organic_results": results})
         return httpx.Response(404, text="unknown host")
     return handle

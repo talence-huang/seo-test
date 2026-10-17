@@ -23,17 +23,29 @@ PLANNER_SYSTEM = """You are the planning module of an SEO competitive-intelligen
 The agent's own program executes every tool call; you only define the research goal and the information needs.
 Your outputs are parsed by code and every decision you make is logged for a human to inspect.
 
+Every research task answers three questions: (1) which on-page SEO strategies the competitors use for the keywords,
+(2) which off-page SEO strategies they use, and (3) which actions the user's own site should prioritise to compete.
+A "strategy" here means a practice that is common on the competitor's ranking pages (and often adopted during the
+window); causality cannot be proven without ranking history, so plan for strong associations, not proof.
+
 Data the program can obtain (live websites; there is no ranking history):
 1. The competitor sites themselves: robots.txt, XML sitemaps (URLs + lastmod dates) and page HTML
-   (title, headings, word or character count, structured-data types, FAQ items, tables, publish/modified dates, links).
+   (title, H1, headings, word or character count, structured-data types, FAQ items, tables, meta description,
+   author, publish/modified dates, internal links).
 2. Historical snapshots of pages from the Wayback Machine, to compare a page before and after a date.
 3. Current search results for the task's keywords, only when the task's available_data says so.
+4. Backlink exports the user uploaded (Ahrefs / Semrush), only for the domains listed in available_data.
+5. The user's own site, measured the same way, only when the task has an own_site.
 
 Information need kinds you may request:
 - serp_competitors: which domains and which pages currently rank for the keywords (only if search results are available).
 - site_inventory: which page templates target_domains have, how many pages, and which were recently modified.
+- ranking_pages: which practices the competitors' ranking pages share, compared with their other topic pages.
 - page_changes: what changed on target_domains' topic pages during the window (content, structure,
   structured data, new pages).
+- backlink_profile: the competitors' (and own site's) backlink growth, anchor text and link targets
+  (only if backlink data is available).
+- own_site_profile: the same practices measured on the user's own topic pages (only if the task has an own_site).
 
 Rules:
 - Nothing is known until measured. Do not assume a cause; plan needs that can discriminate between explanations.
@@ -45,7 +57,7 @@ Rules:
 
 class GoalOut(BaseModel):
     restated_question: str
-    goal_type: Literal["ranking_drop_cause", "competitor_content_strategy", "other"]
+    goal_type: Literal["competitive_strategy", "ranking_drop_cause", "competitor_content_strategy", "other"]
     topic_keywords: list[str]
     focus_domains: list[str]
     window_start: str
@@ -54,7 +66,8 @@ class GoalOut(BaseModel):
 
 
 class NeedOut(BaseModel):
-    kind: Literal["serp_competitors", "site_inventory", "page_changes"]
+    kind: Literal["serp_competitors", "site_inventory", "ranking_pages", "page_changes", "backlink_profile",
+                  "own_site_profile"]
     question: str
     target_domains: list[str]
     answer_criteria: str
@@ -106,7 +119,8 @@ REFLECTOR_SYSTEM = """You turn a human analyst's correction of a research claim 
 competitive-intelligence research agent. The lesson will be shown to future episodes and may bias their behaviour.
 Write trigger and lesson in Traditional Chinese (Taiwan). Biases must use the fixed vocabulary:
 - avoid_path: skip URLs whose path starts with `path` (form /segment/) on `domain` ("*" = any site)
-- info_need_priority: set information need `kind` (serp_competitors, site_inventory, page_changes) to `priority` 1-5 (1 = highest)
+- info_need_priority: set information need `kind` (serp_competitors, site_inventory, ranking_pages, page_changes,
+  backlink_profile, own_site_profile) to `priority` 1-5 (1 = highest)
 - hypothesis_prior: shift the prior of hypothesis `category` (competitor_content_change, competitor_new_pages,
   sitewide_factor, own_site_change, other) by `delta` within +-0.2
 - sampling_focus / skip_costly_probes: only if the correction explicitly asks for that behaviour (threshold 0.85-0.99)
@@ -238,10 +252,17 @@ def task_json(task: TaskInput) -> str:
         "site_language": task.site_language,
     }
     # 告訴 LLM 哪些資料拿得到、哪些拿不到，避免規劃不存在的資料
+    serp = task.serp_source in ("serpapi", "csv")
+    backlinks = task.backlink_source == "csv"
     data |= {"keywords": task.keywords, "environment": "live websites",
              "available_data": ["robots.txt and sitemaps", "live pages", "Wayback Machine snapshots"]
-             + (["current search results for the keywords"] if task.serp_source in ("serpapi", "csv") else []),
-             "unavailable_data": ["ranking history over time", "non-topic control queries"]}
+             + (["current search results for the keywords"] if serp else [])
+             + ([f"backlink export for: {', '.join(task.backlink_domains)}"] if backlinks else [])
+             + (["the user's own site (same page measurements)"] if task.own_site else []),
+             "unavailable_data": ["ranking history over time", "non-topic control queries"]
+             + ([] if serp else ["current search results (which pages rank)"])
+             + ([] if backlinks else ["backlink data (off-page)"])
+             + ([] if task.own_site else ["the user's own site"])}
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 

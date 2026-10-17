@@ -31,6 +31,7 @@ class EpisodeContext:
     run_dir: Path
     frontier: Frontier | None = None
     memory: Any = None   # MemorySession | None（None＝不使用記憶，即 Day 1 的狀態）
+    backlinks: Any = None   # BacklinkData | None（使用者提供的反向連結 CSV）
     scratch: dict[str, Any] = field(default_factory=dict)   # 不寫入檢查點的暫存（例如原始工具結果）
 
 

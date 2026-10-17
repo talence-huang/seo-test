@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 
+from seo_intel.core import strategy
 from seo_intel.core.context import EpisodeContext
 from seo_intel.core.frontier import site_recent_share, template_key
 
@@ -51,12 +52,36 @@ def observation_digest(ctx: EpisodeContext) -> dict:
             findings.append({"template": tkey, "changed_pages": 0, "on_topic_pages_checked": n})
     general = [{"id": o.id, "kind": o.kind, "summary": o.summary} for o in st.observations
                if o.kind not in ("page", "page_diff")]
+    profiles = strategy_profiles(ctx)
     pages = [{"id": o.id, "kind": o.kind, "summary": o.summary} for o in st.observations
              if o.kind in ("page", "page_diff")][-PAGE_OBS_LIMIT:]
     known = sorted(t.key for t in fr.templates.values()
                    if t.domain in st.task.allowed_domains and not t.trap and (t.n_sitemap or t.n_urls >= 3))
     return {"rank": rank, "serp": serp, "inventory": inventory, "template_findings": findings,
+            "strategy_profiles": profiles, "strategy_dimensions": {k: d.label for k, d in strategy.DIMENSIONS.items()},
             "observations": general + pages, "known_templates": known}
+
+
+def strategy_profiles(ctx: EpisodeContext) -> list[dict]:
+    """三種輪廓的精簡版：排名頁 vs 其他主題頁的對比、自家主題頁、反向連結（數字都由程式算好）。"""
+    out = []
+    for o in ctx.state.observations:
+        d = o.data
+        if o.kind == "onpage_profile":
+            contrast = sorted((r for r in d["contrast"] if r["p"] < 0.3), key=lambda r: r["p"])[:10]
+            out.append({"obs": o.id, "kind": o.kind, "site": d["site"], "has_serp": d["has_serp"],
+                        "n_ranking": d["n_ranking"], "n_others": d["n_others"], "ranking_templates": d["ranking_templates"],
+                        "ranking_profile": d["ranking_profile"], "contrast": contrast,
+                        "adopted_in_window_on_ranking_pages": d["adopted_in_window"]})
+        elif o.kind == "own_profile":
+            out.append({"obs": o.id, "kind": o.kind, "site": d["site"], "n": d["n"], "profile": d["profile"],
+                        "own_ranking_urls": len(d["ranking_urls"])})
+        elif o.kind == "link_profile":
+            out.append({"obs": o.id, "kind": o.kind, **{k: d.get(k) for k in (
+                "site", "own", "n_links", "n_ref_domains", "new_ref_domains_in_window", "baseline_in_same_length",
+                "growth_ratio", "anchor_share", "top_targets", "share_to_ranking_pages", "nofollow_share",
+                "median_authority")}})
+    return out
 
 
 def hypotheses_digest(ctx: EpisodeContext, include_reasoning: bool = True) -> list[dict]:
