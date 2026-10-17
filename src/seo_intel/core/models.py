@@ -42,7 +42,11 @@ ToolName = Literal["serp_scan", "discover", "fetch", "history_diff"]
 
 
 class TaskInput(BaseModel):
-    """使用者交給 Agent 的研究任務：競品網站、關鍵字與研究期間（真實網站沒有排名歷史與標準答案）。"""
+    """使用者交給 Agent 的研究任務：競品網站、關鍵字與研究期間（真實網站沒有排名歷史與標準答案）。
+
+    研究要回答三個問題：競品的 On-page 策略、Off-page 策略，以及我們最值得優先採取的行動。
+    各問題需要的資料（排名、反向連結、自家網站）都是選填；缺少時 Agent 照樣研究，但會在報告寫明哪個問題答不了。
+    """
 
     question: str
     own_site: str = ""
@@ -52,6 +56,8 @@ class TaskInput(BaseModel):
     site_language: str = "en"
     keywords: list[str] = []                       # 使用者指定的關鍵字
     serp_source: Literal["none", "serpapi", "csv"] = "none"   # 目前 SERP 從哪裡來
+    backlink_source: Literal["none", "csv"] = "none"         # 反向連結（Off-page）從哪裡來
+    backlink_domains: list[str] = []               # 任務網域中，反向連結資料裡有連結指向的網域
 
     @property
     def allowed_domains(self) -> list[str]:

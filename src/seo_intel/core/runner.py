@@ -80,14 +80,16 @@ def prepare_real(params: dict, settings: Settings, llm_factory: Callable[[Path],
                  memory: MemorySession | None = None, run_root: Path = RUNS_DIR, run_cfg: dict | None = None,
                  client=None, clock=None, today: date | None = None, history: Path | None = None) -> EpisodeContext:
     """建立真實網站研究的 episode（還沒開始跑）。params：competitors、keywords、own_site、start、end、
-    serp_source、csv_path。run_cfg：記憶與預算設定（與環境設定一起寫進 run.json，續跑時沿用）。"""
+    serp_source、csv_path、backlink_paths。run_cfg：記憶與預算設定（與環境設定一起寫進 run.json，續跑時沿用）。"""
     from seo_intel.real import env as real
 
     client = client or real.real_client()
     clock = clock or real.RealClock()
     env = real.env_config(params, Path(params["csv_path"]) if params.get("csv_path") else None)
     real.check_serp(env)
-    task = real.build_task(params, client, today)
+    task_domains = [*(params.get("competitors") or []), params.get("own_site") or ""]
+    backlinks = real.load_backlinks(env, [real.parse_domain(d) for d in task_domains if (d or "").strip()])
+    task = real.build_task(params, client, today, backlinks=backlinks)
     state = new_state(task, clock)
     run_dir = run_root / state.id
     run_dir.mkdir(parents=True, exist_ok=True)

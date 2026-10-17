@@ -30,8 +30,8 @@
         <label>關鍵字（每行一個）
           <textarea name="keywords" rows="2" placeholder="高山茶&#10;烏龍茶"></textarea>
         </label>
-        <label>自家網址（選填）
-          <input name="own_site" placeholder="https://your-site.com">
+        <label>自家網址（建議填寫：優先行動要和自家網站比較差距）
+          <input name="own_site" id="own-site" placeholder="https://your-site.com">
         </label>
         <div class="two">
           <label>研究期間開始 <input type="date" name="start"></label>
@@ -46,7 +46,12 @@
         </label>
         <input type="file" id="serp-csv" accept=".csv,text/csv" hidden>
         <p class="hint" id="serp-hint"></p>
-        <p class="hint">Agent 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔，並用 Wayback Machine 比對頁面歷史版本。沒有排名歷史，所以研究的是「競品在這些關鍵字做了什麼內容策略」。開始前會請求一次首頁以確認正式網域。</p>
+        <label>反向連結 CSV（選填，可選多個；Off-page 策略需要）
+          <input type="file" id="backlinks-csv" accept=".csv,.tsv,text/csv" multiple>
+        </label>
+        <p class="hint">從 Ahrefs（Backlinks）或 Semrush（Backlinks）匯出競品與自家網站的反向連結；至少需要「來源網址、目標網址」，建議包含錨點文字與首次發現日期。依目標網址自動分到各網站。</p>
+        <div class="callout" id="data-gaps" hidden></div>
+        <p class="hint">研究要回答三個問題：競品的 On-page 策略、Off-page 策略，以及我們最值得優先採取的行動。Agent 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔，並用 Wayback Machine 比對頁面歷史版本；開始前會請求一次首頁以確認正式網域。</p>
         <p class="hint" id="key-hint"></p>
         <fieldset>
           <legend>記憶</legend>

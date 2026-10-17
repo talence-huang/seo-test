@@ -302,11 +302,13 @@ def research(
     typer_ctx: typer.Context,
     site: Annotated[list[str] | None, typer.Option("--site", help="競品網址（可重複）")] = None,
     keyword: Annotated[list[str] | None, typer.Option("--keyword", "-k", help="關鍵字（可重複）")] = None,
-    own_site: Annotated[str | None, typer.Option("--own-site", help="自家網址（選填）")] = None,
+    own_site: Annotated[str | None, typer.Option("--own-site", help="自家網址（建議填寫：優先行動要和自家網站比較）")] = None,
     start: Annotated[str | None, typer.Option("--start", help="研究期間開始（YYYY-MM-DD，預設 90 天前）")] = None,
     end: Annotated[str | None, typer.Option("--end", help="研究期間結束（預設今天）")] = None,
     serp: Annotated[str, typer.Option("--serp", help="排名資料：none｜serpapi（需 SERPAPI_API_KEY）｜csv")] = "none",
     serp_csv: Annotated[Path | None, typer.Option("--serp-csv", help="--serp csv 時的排名 CSV（關鍵字、排名、網址）")] = None,
+    backlinks_csv: Annotated[list[Path] | None, typer.Option(
+        "--backlinks-csv", help="反向連結 CSV（Ahrefs、Semrush 匯出；可重複，競品與自家都可以）")] = None,
     step: StepOpt = False,
     quiet: QuietOpt = False,
     verbose: VerboseOpt = False,
@@ -317,7 +319,7 @@ def research(
     max_fetches: MaxFetchesOpt = None,
     max_llm_usd: MaxLlmOpt = None,
 ) -> None:
-    """研究真實網站：競品在這些關鍵字做了什麼內容策略（使用真實 Opus，每次約 US$0.3）。"""
+    """研究真實網站：競品的 On-page／Off-page 策略與我們的優先行動（使用真實 Opus，每次約 US$0.3）。"""
     if typer_ctx.invoked_subcommand:
         return
     if not site or not keyword:
@@ -335,7 +337,8 @@ def research(
                "budget": {k: v for k, v in budget.items() if v is not None}}
     settings, mem = apply_run_config(get_settings(), run_cfg)
     params = {"competitors": site, "keywords": keyword, "own_site": own_site, "start": start, "end": end,
-              "serp_source": serp, "csv_path": str(serp_csv.resolve()) if serp_csv else None}
+              "serp_source": serp, "csv_path": str(serp_csv.resolve()) if serp_csv else None,
+              "backlink_paths": [str(x.resolve()) for x in backlinks_csv or []]}
     console.print("只抓公開頁面、遵守 robots.txt 與抓取間隔；開始前會請求一次首頁以確認正式網域。")
     try:
         ectx = prepare_real(params, settings, lambda run_dir: _make_llm(settings, run_dir), memory=mem, run_cfg=run_cfg)
@@ -344,6 +347,10 @@ def research(
         if mem:
             mem.store.close()
         raise typer.Exit(1) from None
+    from seo_intel.real.env import data_gaps
+
+    for gap in data_gaps(ectx.state.task):
+        console.print(f"[yellow]資料缺口[/]：{escape(gap)}")
     _execute(ectx, step=step, quiet=quiet, verbose=verbose, db_path=path, resumed=False)
 
 

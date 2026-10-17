@@ -3,18 +3,22 @@
 端對端研究需要真實 Opus（標記 live，以 pytest -m live 明確執行，每次約 US$0.3）；其餘為免費的單元測試。
 """
 
+import base64
+import json
 from datetime import date
 
 import httpx
 import pytest
 
 from seo_intel.core.frontier import detect_trap, template_key
-from seo_intel.core.runner import run_real
+from seo_intel.core.runner import prepare_real, run_real
 from seo_intel.llm import AnthropicLLM
-from seo_intel.real.env import build_task, canonical_host, check_serp, parse_domain
+from seo_intel.real.env import (build_task, canonical_host, check_serp, data_gaps, env_config, load_backlinks,
+                                parse_domain)
 from seo_intel.real.serp import CsvProvider, RealRankClient, SerpHistory
 from seo_intel.tools.http import redact
 from seo_intel.tools.text import matches_topic, tokens
+from seo_intel.web.jobs import save_uploads
 from tests import realsite
 from tests.conftest import TestClock
 
@@ -119,3 +123,60 @@ def test_real_site_without_serp_source(settings, tmp_path, monkeypatch):
 
 def test_redact_hides_secrets():
     assert "SECRET" not in redact("https://serpapi.com/search.json?q=x&api_key=SECRET")
+
+
+BACKLINKS = """Referring page URL,Target URL,Anchor,First seen
+https://blog.example.com/p1,https://www.a.tw/guide/x/,高山茶推薦,2026-09-01
+https://news.example.net/p2,https://own.tw/,我們,2025-01-01
+"""
+
+
+def test_task_asks_three_questions_and_states_data_gaps():
+    t = build_task({"competitors": ["a.tw"], "keywords": ["高山茶"]}, today=TODAY)
+    assert all(x in t.question for x in ("On-page", "Off-page", "最值得優先採取的行動"))
+    gaps = data_gaps(t)
+    assert len(gaps) == 3 and "沒有排名資料" in gaps[0] and "Off-page" in gaps[1] and "自家網址" in gaps[2]
+    assert "自家網站 own.tw" in build_task({"competitors": ["a.tw"], "keywords": ["k"], "own_site": "own.tw"},
+                                         today=TODAY).question
+
+
+def test_backlink_csv_coverage_and_errors(tmp_path):
+    csv = tmp_path / "ahrefs.csv"
+    csv.write_text(BACKLINKS, encoding="utf-8")
+    p = {"competitors": ["a.tw", "b.tw"], "keywords": ["高山茶"], "own_site": "own.tw", "serp_source": "csv",
+         "backlink_paths": [str(csv)]}
+    env = env_config(p)
+    data = load_backlinks(env, ["a.tw", "b.tw", "own.tw"])
+    t = build_task(p, today=TODAY, backlinks=data)
+    assert t.backlink_source == "csv" and t.backlink_domains == ["a.tw", "own.tw"]      # www. 與否視為同一網站
+    assert data_gaps(t) == ["反向連結 CSV 沒有 b.tw 的資料：這些競品的 Off-page 策略無法研究"]
+    assert load_backlinks(env_config({})) is None
+    with pytest.raises(ValueError, match="找不到反向連結 CSV"):
+        load_backlinks(env_config({"backlink_paths": [str(tmp_path / "nope.csv")]}))
+    with pytest.raises(ValueError, match="沒有指向競品或自家網站"):
+        load_backlinks(env, ["c.tw"])
+    bad = tmp_path / "bad.csv"
+    bad.write_text("Anchor\nx\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="缺少欄位"):
+        load_backlinks(env_config({"backlink_paths": [str(bad)]}))
+
+
+def test_web_uploads_are_saved_as_bytes(tmp_path):
+    utf16 = "Referring page URL\tTarget URL\nhttps://s.example.com/a\thttps://a.tw/\n".encode("utf-16")
+    files = [{"name": "Ahrefs 匯出 (Excel).csv", "data": base64.b64encode(utf16).decode()}, {"name": "empty.csv", "data": ""}]
+    saved = save_uploads(files, "backlinks", root=tmp_path)
+    assert len(saved) == 1 and saved[0].read_bytes() == utf16 and saved[0].name.endswith(".csv")
+    assert load_backlinks(env_config({"backlink_paths": [str(saved[0])]}), ["a.tw"]).links[0].target_domain == "a.tw"
+    with pytest.raises(ValueError, match="無法讀取"):
+        save_uploads([{"name": "x.csv", "data": "不是 base64"}], "backlinks", root=tmp_path)
+
+
+def test_backlink_paths_are_kept_for_resume(settings, tmp_path):
+    csv = tmp_path / "links.csv"
+    csv.write_text(BACKLINKS.replace("www.a.tw", realsite.SITE), encoding="utf-8")
+    ctx = prepare_real({"competitors": [realsite.SITE], "keywords": realsite.KEYWORDS, "backlink_paths": [str(csv)]},
+                       settings, lambda d: None, run_root=tmp_path / "runs", client=realsite.client([]),
+                       clock=TestClock(), today=TODAY, history=tmp_path / "h.jsonl")
+    assert ctx.state.task.backlink_domains == [realsite.SITE]
+    env = json.loads((ctx.run_dir / "run.json").read_text(encoding="utf-8"))["env"]
+    assert env["backlink_paths"] == [str(csv)]

@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import re
 import threading
 import time
 import traceback
@@ -20,10 +23,35 @@ from seo_intel.core.loop import ResearchLoop
 from seo_intel.core.runner import DEFAULT_MEMORY, apply_run_config, load_run_config, write_artifacts
 from seo_intel.observe.store import DbRecorder
 from seo_intel.observe.trace import TraceWriter, truncate_trace
+from seo_intel.real.env import data_gaps
 from seo_intel.store import Database
 
 DEFAULT_DB = PROJECT_ROOT / "data" / "intel.db"
 UPLOADS = PROJECT_ROOT / "data" / "uploads"
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+def save_uploads(files: list[dict], prefix: str, root: Path | None = None) -> list[Path]:
+    """網頁上傳的檔案（{name, data: base64}）存進 data/uploads，續跑時才讀得到。
+    以位元組保存：Ahrefs 的「Excel 用」匯出是 UTF-16，交給讀取端判斷編碼。"""
+    root = root or UPLOADS
+    out = []
+    stamp = int(time.time())
+    for i, f in enumerate(files):
+        try:
+            data = base64.b64decode(f.get("data") or "", validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError(f"上傳的檔案 {f.get('name') or i + 1} 無法讀取") from None
+        if not data:
+            continue
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise ValueError(f"上傳的檔案 {f.get('name')} 超過 50 MB")
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(f.get("name") or "upload.csv").name)[-60:]
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{prefix}-{stamp}-{i + 1}-{safe}"
+        path.write_bytes(data)
+        out.append(path)
+    return out
 
 
 def make_llm(settings, run_dir: Path):
@@ -118,6 +146,7 @@ class JobManager:
             csv_path.write_text(p["serp_csv"], encoding="utf-8")
         params = {k: p.get(k) for k in ("competitors", "keywords", "own_site", "start", "end", "serp_source")}
         params["csv_path"] = str(csv_path) if csv_path else None
+        params["backlink_paths"] = [str(x) for x in save_uploads(p.get("backlinks_csv") or [], "backlinks")]
         with self._lock:
             if (b := self.busy()) is not None:
                 raise RuntimeError(f"已有工作在執行（{b.kind} {b.episode_id or b.id}），請等它結束或暫停")
@@ -133,7 +162,7 @@ class JobManager:
         self.by_episode[ctx.state.id] = job
         job.emit("start", episode_id=ctx.state.id, task=ctx.state.task.model_dump(mode="json"),
                  budget={"max_fetches": ctx.ledger.max_fetches, "max_llm_usd": ctx.ledger.max_llm_usd},
-                 memory=str(mem.store.path) if mem else None)
+                 memory=str(mem.store.path) if mem else None, gaps=data_gaps(ctx.state.task))
         threading.Thread(target=self._run, args=(job, ctx, False, []), daemon=True).start()
         return job
 

@@ -76,6 +76,25 @@ function updateSerpHint() {
 }
 $("#serp-source").addEventListener("change", updateSerpHint);
 const readFile = (file) => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsText(file, "utf-8"); });
+// 以位元組（base64）上傳：Ahrefs 的「Excel 用」匯出是 UTF-16，由伺服器判斷編碼
+const readFileB64 = (file) => new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(",")[1] || ""); r.onerror = fail; r.readAsDataURL(file); });
+
+// 缺少哪些資料、會影響哪個問題（與伺服器的 data_gaps 同一套說明，開始前就讓使用者知道）
+function formGaps() {
+  const gaps = [];
+  if ($("#serp-source").value === "none") gaps.push("沒有排名資料：Agent 不知道哪些頁面真的有排名，只能從 sitemap 推測主題頁，On-page 策略的結論會弱很多（建議上傳排名 CSV 或使用 SerpApi）");
+  if (!$("#backlinks-csv").files.length) gaps.push("沒有反向連結 CSV：無法研究 Off-page 策略");
+  if (!$("#own-site").value.trim()) gaps.push("沒有自家網址：優先行動無法和自家網站比較差距");
+  return gaps;
+}
+function updateDataGaps() {
+  const gaps = formGaps(), box = $("#data-gaps");
+  box.hidden = gaps.length === 0;
+  box.innerHTML = `<b>資料缺口</b><ul>${gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul>`;
+}
+["#serp-source", "#backlinks-csv"].forEach((s) => $(s).addEventListener("change", updateDataGaps));
+$("#own-site").addEventListener("input", updateDataGaps);
+updateDataGaps();
 const lines = (v) => String(v || "").split(/[\n,，、]+/).map((x) => x.trim()).filter(Boolean);
 
 $("#research-form").addEventListener("submit", async (e) => {
@@ -95,7 +114,10 @@ $("#research-form").addEventListener("submit", async (e) => {
     if (!file) { showError($("#research-error"), "請選擇排名 CSV 檔"); return; }
     body.serp_csv = await readFile(file);
   }
-  if (!confirm("這次研究會呼叫真實 Opus（約 US$0.3）並實際抓取競品網站，確定要開始嗎？")) return;
+  body.backlinks_csv = await Promise.all([...$("#backlinks-csv").files].map(async (file) => ({ name: file.name, data: await readFileB64(file) })));
+  const gaps = formGaps();
+  const gapText = gaps.length ? `\n\n資料缺口（研究照樣進行，報告會註明）：\n- ${gaps.join("\n- ")}` : "";
+  if (!confirm(`這次研究會呼叫真實 Opus（約 US$0.3）並實際抓取競品網站，確定要開始嗎？${gapText}`)) return;
   try {
     const job = await api("/api/research", body);
     watchJob(job.id, true);
@@ -150,6 +172,8 @@ function handleEvent(ev) {
     if (ev.task) $("#run-question").textContent = `競品：${ev.task.competitors.join("、")}｜關鍵字：${(ev.task.keywords || []).join("、")}`;
     if (ev.budget) RUN.budget = ev.budget;
     if (ev.type === "resume") $("#run-result").innerHTML = "";
+    if (ev.gaps && ev.gaps.length) $("#run-result").insertAdjacentHTML("beforeend",
+      `<div class="callout"><b>資料缺口</b>（研究照樣進行，報告會註明哪些問題答不了）<ul>${ev.gaps.map((g) => `<li>${esc(g)}</li>`).join("")}</ul></div>`);
   } else if (ev.type === "step") {
     addStep(ev.record);
   } else if (ev.type === "await") {

@@ -52,7 +52,7 @@
 
 ## 5. 結果（2026-10-17，`claude-opus-5-5`，35 次研究）
 
-完整報告：[`evals/results/20261017-opus-v2/report.md`](../evals/results/20261017-opus-v2/report.md)。用 `python -m evals replay evals/results/20261017-opus-v2` 可以免費重現，已驗證 35/35 次研究的結果完全相同。
+完整報告：[`evals/results/20261017-opus-v2/report.md`](../evals/results/20261017-opus-v2/report.md)。用 `python -m evals replay evals/results/20261017-opus-v2` 可以免費重現，已驗證 35/35 次研究的結果完全相同。重播必須在 commit `3a834dd` 的程式版本執行（`git checkout 3a834dd`）；之後的改版改變了送給 LLM 的提示，重播會找不到對應的錄製紀錄。
 
 ### 5.1 Day 1 → Day N
 
