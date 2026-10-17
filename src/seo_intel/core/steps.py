@@ -13,7 +13,7 @@ from collections import Counter
 from datetime import date, timedelta
 from urllib.parse import urlsplit
 
-from seo_intel.core import approvals, beliefs, probes
+from seo_intel.core import approvals, beliefs, probes, strategy
 from seo_intel.core.actions import COMPONENT_LABELS, compute_phase, focus_satisfied, generate
 from seo_intel.core.claims import confounder_note, derive_claims, render_markdown, validate_citations
 from seo_intel.core.context import EpisodeContext, StepOutcome, llm_record
@@ -91,6 +91,12 @@ def _short(url_or_tkey: str) -> str:
 def _window(ctx: EpisodeContext) -> tuple[date, date]:
     g = ctx.state.goal
     return g.window_start, g.window_end
+
+
+def _phrases(ctx: EpisodeContext) -> list[set[str]]:
+    """策略量測用的關鍵字：使用者指定的關鍵字（競爭的就是這些詞）；沒有時用研究目標的主題關鍵字。"""
+    st = ctx.state
+    return strategy.phrases_of(st.task.keywords or st.goal.topic_keywords)
 
 
 def _resolve(need: InfoNeed, text: str, outcome: StepOutcome, status: str = "resolved") -> None:
@@ -430,10 +436,11 @@ def select_action(ctx: EpisodeContext) -> StepOutcome:
 # ---------- EXECUTE_TOOL ----------
 
 def _features_from_info(url: str, info: dict) -> PageFeatures:
-    return PageFeatures(url=url, h2=info.get("h2", []), word_count=info.get("words", 0),
-                        schema_types=info.get("schema", []), faq_count=info.get("faq", 0),
-                        has_table=info.get("table", False), modified=info.get("modified"),
-                        published=info.get("published"))
+    return PageFeatures(url=url, title=info.get("title", ""), h1=info.get("h1", ""), h2=info.get("h2", []),
+                        word_count=info.get("words", 0), schema_types=info.get("schema", []),
+                        faq_count=info.get("faq", 0), has_table=info.get("table", False),
+                        modified=info.get("modified"), published=info.get("published"),
+                        meta_description=info.get("meta_desc", ""), author=info.get("author", ""))
 
 
 def execute_tool(ctx: EpisodeContext) -> StepOutcome:
@@ -607,10 +614,12 @@ def _parse_fetch(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
         fr.add(link, source="link", anchor=anchor, allowed=ctx.http.allowed(link))
     entry = fr.entries.get(url)
     fr.mark_fetched(url, ok=True, evidence=evidence, blocked=False)
-    info = {"status": 200, "template": tkey, "title": f.title, "words": f.word_count, "schema": f.schema_types,
-            "faq": f.faq_count, "table": f.has_table, "h2": f.h2, "modified": f.modified, "published": f.published,
+    info = {"status": 200, "template": tkey, "title": f.title, "h1": f.h1, "words": f.word_count,
+            "schema": f.schema_types, "faq": f.faq_count, "table": f.has_table, "h2": f.h2, "modified": f.modified,
+            "published": f.published, "meta_desc": f.meta_description[:200], "author": f.author[:80],
             "on_topic": on_topic, "evidence": evidence, "relevance": entry.relevance if entry else 0.0,
             "js_shell": f.js_shell, "malformed": f.malformed}
+    info["strategy"] = strategy.page_values(url, info, _phrases(ctx), (ws, we))   # 策略維度：每一頁都量，供對比與差距
     if new_page:
         st.template_changes.setdefault(tkey, []).append(url)
         info["change"] = "new"
@@ -621,6 +630,8 @@ def _parse_fetch(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
                   f"FAQ {f.faq_count}，修改 {mod or '—'}）"
     out.details.append(f"新發現連結 {len(fr.entries) - n_before} 個；範本 {_short(tkey)} "
                        f"證據率 {fr.templates[tkey].value:.2f}（{fr.templates[tkey].n_evidence}/{fr.templates[tkey].n_fetched}）")
+    if not f.js_shell:
+        out.details.append(f"策略量測：{strategy.describe(info['strategy'])}")
     if evidence:
         obs = st.add_observation("page", f"{_short(url)}：主題頁，{'新發布' if new_page else '修改'}於期間內",
                                  {**info, "new_page": new_page, "h2": f.sections}, need_id=st.pending.need_id, url=url)
@@ -649,6 +660,15 @@ def _parse_history(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
     if raw["status"] == "ok":
         summary = (f"{_short(url)}：{raw['snapshot_date']} → 目前，字數 {raw['words_before']}→{raw['words_after']}"
                    f"（{raw['words_change_pct']:+.0%}）；{', '.join(raw['change_types']) or '無顯著變化'}")
+        if raw.get("before_page"):   # 改版前後的策略維度：哪些做法是研究期間內才採用的
+            after = info.get("strategy") or strategy.page_values(url, info, _phrases(ctx), _window(ctx))
+            before = strategy.page_values(url, raw["before_page"], _phrases(ctx), _window(ctx))
+            raw["adopted"], raw["dropped"] = strategy.adoption(before, after)
+            info["adopted"] = raw["adopted"]
+            if raw["adopted"]:
+                summary += "；期間內新採用：" + "、".join(strategy.label(k) for k in raw["adopted"])
+            if raw["dropped"]:
+                summary += "；拿掉：" + "、".join(strategy.label(k) for k in raw["dropped"])
         if raw["significant"] and url not in st.template_changes.get(tkey, []):
             st.template_changes.setdefault(tkey, []).append(url)
             info["change"] = "diff"

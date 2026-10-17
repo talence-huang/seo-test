@@ -180,3 +180,28 @@ def test_backlink_paths_are_kept_for_resume(settings, tmp_path):
     assert ctx.state.task.backlink_domains == [realsite.SITE]
     env = json.loads((ctx.run_dir / "run.json").read_text(encoding="utf-8"))["env"]
     assert env["backlink_paths"] == [str(csv)]
+
+
+def test_research_records_strategy_measurements(settings, tmp_path, monkeypatch):
+    """不呼叫 LLM 的完整研究：每頁的策略維度寫進紀錄，改版前後算出期間內新採用的做法。"""
+    from seo_intel.llm.types import LLMFatalError
+    from seo_intel.observe.trace import read_trace
+
+    class NoLLM:
+        def call(self, role, *, system, user, schema):
+            raise LLMFatalError("不呼叫 LLM")
+
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    r = run_real({"competitors": [realsite.SITE], "keywords": realsite.KEYWORDS, "serp_source": "serpapi"},
+                 settings, lambda d: NoLLM(), run_root=tmp_path / "runs", client=realsite.client([]), clock=TestClock(),
+                 today=TODAY, history=tmp_path / "h.jsonl")
+    st = r.state
+    guide = [i for u, i in st.fetched.items() if "/guide/" in u and i.get("status") == 200]
+    assert guide and all(i["strategy"]["kw_title"] and "internal_links" not in i["strategy"] for i in guide)
+    updated = [i for i in guide if i["strategy"]["schema_faq"]]
+    assert updated and all(i["strategy"]["content_depth"] > 600 for i in updated)
+    diffs = [o for o in st.observations if o.kind == "page_diff" and o.data.get("adopted")]
+    assert diffs and {"schema_faq", "faq", "content_depth"} <= set(diffs[0].data["adopted"])
+    assert "期間內新採用：" in diffs[0].summary
+    lines = [d for rec in read_trace(r.ctx.run_dir / "trace.jsonl") for d in rec.details if d.startswith("策略量測：")]
+    assert lines

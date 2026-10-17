@@ -19,5 +19,8 @@ def history_diff(ac, url: str, current: PageFeatures, before: date) -> dict:
     if html is None:
         return {"url": url, "status": "snapshot_unavailable", "snapshot_date": prior[-1].isoformat()}
     old = extract(html, url)
+    before_page = {"title": old.title, "h1": old.h1, "words": old.word_count, "h2": old.h2, "faq": old.faq_count,
+                   "schema": old.schema_types, "table": old.has_table, "meta_desc": old.meta_description,
+                   "author": old.author, "modified": old.modified}   # 舊版頁面的特徵：判斷某個做法是不是期間內才採用
     return {"url": url, "status": "ok", "snapshot_date": prior[-1].isoformat(),
-            "current_modified": current.modified, **diff_features(old, current)}
+            "current_modified": current.modified, "before_page": before_page, **diff_features(old, current)}

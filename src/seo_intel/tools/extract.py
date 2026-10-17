@@ -46,6 +46,8 @@ class PageFeatures:
     published: str | None = None
     modified: str | None = None
     canonical: str | None = None
+    meta_description: str = ""
+    author: str = ""                       # meta author 或 JSON-LD 的 author（E-E-A-T 訊號）
     links: list[tuple[str, str]] = field(default_factory=list)
     js_shell: bool = False
     malformed: bool = False
@@ -174,6 +176,17 @@ def _ld_nodes(ld) -> list[dict]:
     return [ld, *[n for x in ld.get("@graph") or [] for n in _ld_nodes(x)]]
 
 
+def _author_name(value) -> str:
+    """JSON-LD 的 author 可能是字串、物件（name）或陣列。"""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("name") or "").strip()
+    if isinstance(value, list):
+        return next((n for n in (_author_name(v) for v in value) if n), "")
+    return ""
+
+
 def extract(html: str, url: str) -> PageFeatures:
     p = _Parser()
     try:
@@ -184,6 +197,7 @@ def extract(html: str, url: str) -> PageFeatures:
     schema: list[str] = []
     faq_entities = 0
     ld_dates: dict[str, str] = {}
+    author = ""
     for raw in p.ldjson:
         try:
             ld = json.loads(raw)
@@ -197,6 +211,7 @@ def extract(html: str, url: str) -> PageFeatures:
             for key in ("datePublished", "dateModified"):
                 if isinstance(node.get(key), str):
                     ld_dates.setdefault(key, node[key])
+            author = author or _author_name(node.get("author"))
     host = urlsplit(url).hostname
     links = []
     for href, anchor in p.links:
@@ -218,6 +233,8 @@ def extract(html: str, url: str) -> PageFeatures:
         modified=(p.meta.get("article:modified_time") or p.meta.get("og:updated_time")
                   or ld_dates.get("dateModified")),
         canonical=p.canonical,
+        meta_description=(p.meta.get("description") or "").strip(),
+        author=(p.meta.get("author") or "").strip() or author,
         links=links,
         js_shell=p.root_div and words < 30,
         malformed="</html>" not in html[-200:].lower(),
