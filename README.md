@@ -1,6 +1,12 @@
 # seo-intel
 
-可觀察的 SEO 競爭情報研究 Agent：輸入競品網址與關鍵字，Agent 會自己規劃、抓取競品網站、比對頁面歷史版本、提出並檢驗假設，最後給出有證據支撐的結論——每一步的決策、理由與證據都看得到。
+可觀察的 SEO 競爭情報研究 Agent：輸入競品網址與關鍵字，Agent 會自己規劃、抓取競品網站、比對頁面歷史版本、提出並檢驗假設，回答三個問題——
+
+1. 競品在這些關鍵字上採取了哪些關鍵的 **On-page** SEO 策略？
+2. 採取了哪些關鍵的 **Off-page** SEO 策略？
+3. 我們若要與之競爭，**最值得優先採取的行動**為何？
+
+每一步的決策、理由與證據都看得到；結論與行動排序由程式從量測推導，LLM 只負責提出假設與撰寫說明。
 
 > 本專案原本是研究原型（在模擬世界 SimWeb 中以確定性的假 LLM 做評測）。2026-10-17 起移除了模擬世界、假 LLM 與評測工具，只保留研究真實網站的功能；研究期間的完整版本與數據保留在 git 標籤 `research-final`（見 [docs/07](docs/07-research-findings.md)）。
 
@@ -30,7 +36,7 @@ seo-intel web
 
 | 分頁 | 可以做什麼 |
 |---|---|
-| 研究 | 輸入競品網址、關鍵字（每行一個）、研究期間與排名資料來源後開始研究；即時看到每一步（點一下展開理由、候選行動與分數、LLM 輸出、HTTP 請求）；逐步模式可按「下一步／連續執行／暫停並存檔」；結束後看結論、假設、限制、學到什麼，開啟完整時間軸，或糾正結論 |
+| 研究 | 輸入競品網址、關鍵字（每行一個）、自家網址、研究期間、排名資料來源與反向連結 CSV 後開始研究；表單會即時列出「缺少哪些資料、哪個問題因此答不了」；即時看到每一步（點一下展開理由、候選行動與分數、LLM 輸出、HTTP 請求、每頁的策略量測）；結束後看 On-page／Off-page 策略、優先行動、沒有結論時的原因，開啟完整時間軸，或糾正結論 |
 | 紀錄與核准 | 所有研究紀錄；待核准的請求（附預估）可直接核准或拒絕，Agent 隨即續跑；暫停的研究可繼續 |
 | 記憶 | 經驗庫（狀態、來源、套用成效、程式套用的偏置、稽核軌跡、淘汰）、人工糾偏紀錄、每次研究的成效、M2 範本價值 |
 
@@ -39,15 +45,26 @@ seo-intel web
 ## 研究怎麼進行
 
 ```powershell
-seo-intel research --site https://example.com --keyword 高山茶 --keyword 烏龍茶 --serp serpapi --max-fetches 80
+seo-intel research --site https://example.com --keyword 高山茶 --keyword 烏龍茶 --own-site https://my-site.com --serp csv --serp-csv ranks.csv --backlinks-csv ahrefs-competitor.csv --backlinks-csv ahrefs-own.csv
 ```
+
+**三個問題各需要的資料**（都是選填；缺少時照樣研究，但報告會寫明哪個問題答不了）：
+
+| 問題 | 需要 | 沒有時 |
+|---|---|---|
+| On-page 策略 | 排名資料（SerpApi 或排名 CSV）：知道哪些頁面真的有排名，才能比較「有排名的頁」和「同網站其他主題頁」差在哪 | 只能描述競品主題頁的做法，結論弱很多 |
+| Off-page 策略 | 反向連結 CSV（Ahrefs、Semrush 的 Backlinks 匯出；可上傳多個，依目標網址分到競品或自家） | 無法研究（反向連結無法靠爬網站取得） |
+| 優先行動 | 自家網址（加上自家的反向連結更完整） | 只能依競品的做法排序，無法比較差距 |
+
+**Agent 怎麼得出結論**：先抓競品的排名頁與同網站其他主題頁、自家主題頁，逐頁量測固定的策略維度（內容深度、FAQ 與 FAQPage、title／H1 關鍵字、meta description、作者資訊、比較表、內部連結、期間內更新…）；用 Fisher 檢定比較兩組頁面，並用 Wayback 比對改版前後，判斷做法是不是研究期間內才採用；反向連結則看期間內新增的引用網域、錨點文字、連結指向。LLM 依這些量測提出策略假設，由程式的探針檢驗、紅隊挑戰；成立的策略再和自家網站比較，依「影響 × 差距 ÷ 難度」排出優先行動。
 
 | 資料 | 來源 | 說明 |
 |---|---|---|
 | 網站結構、頁面內容 | 直接抓取（robots.txt → sitemap，沒有 sitemap 時從首頁連結開始） | 只抓公開頁面、遵守 robots.txt 與每個網站 2 秒的抓取間隔 |
 | 頁面改了什麼 | Wayback Machine 歷史快照（免費） | 部分頁面可能沒有快照 |
 | 目前的搜尋排名 | `--serp serpapi`：SerpApi 取得 Google 台灣結果；`--serp csv --serp-csv 檔案`：從 Semrush、Ahrefs、Search Console 匯出的「關鍵字、排名、網址」；`--serp none`：不使用 | 不直接爬 Google（違反服務條款）；每次查到的排名都會存進 `data/serp_history.jsonl`，下次研究同一個關鍵字時就能算出名次變化 |
-| 排名歷史 | 沒有 | 所以研究的是「競品在這些關鍵字做了什麼內容策略」，不是「我們為什麼掉排名」 |
+| 反向連結 | `--backlinks-csv`（可重複）：Ahrefs、Semrush 匯出的 CSV（支援 Excel 用的 UTF-16） | 至少需要來源網址與目標網址；有首次發現日期才能判斷「期間內新增」，有錨點文字才能分析錨點 |
+| 排名歷史 | 沒有 | 所以策略是「有排名的頁面普遍採用的做法」，報告會註明無法證明因果 |
 
 - 真實網站沒有標準答案，結論的可信度來自證據本身（每個主張都由程式從證據推導，能點回原始觀察）。
 - 高風險動作（預算用盡要延長、抓取任務以外的網域、封鎖率過高仍要繼續）會暫停等你核准。
@@ -57,7 +74,7 @@ seo-intel research --site https://example.com --keyword 高山茶 --keyword 烏�
 
 ```powershell
 seo-intel web                            # 本機網頁介面（--port 換埠、--no-open 不自動開瀏覽器）
-seo-intel research --site <網址> -k <關鍵字> [--serp none|serpapi|csv] [--step]   # 研究競品網站
+seo-intel research --site <網址> -k <關鍵字> [--own-site <自家>] [--serp none|serpapi|csv] [--backlinks-csv <檔案>] [--step]   # 研究競品網站
 seo-intel research resume <episode>      # 從檢查點續跑（沿用原本的記憶與預算設定；先套用人工核准的決定）
 seo-intel approvals list                 # 待核准的請求（--all 含已決定的）
 seo-intel approvals approve <A-id|episode> --note "..."   # 核准（一次性、24 小時內有效）

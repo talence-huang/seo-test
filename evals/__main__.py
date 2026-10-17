@@ -102,8 +102,9 @@ def cmd_one(a) -> int:
     ev = EvalState()
     _, s = run_one(a.site, settings, cfg, ev, condition="dev", rep=1)
     (out / "score.json").write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({k: s[k] for k in ("success", "claims", "end_reason", "fetches", "first_key_evidence", "wasted",
-                                        "llm_usd", "violation_detail", "injection_fetched", "injection_detected")},
+    print(json.dumps({k: s[k] for k in ("success", "end_reason", "strategies", "strategy_wrong", "strategy_recall",
+                                        "strategy_precision", "actions_top3", "action_precision", "wrong_actions",
+                                        "fetches", "wasted", "llm_usd", "violation_detail", "injection_detected")},
                      ensure_ascii=False))
     print(f"研究紀錄：{out / 'runs'}")
     return 0
