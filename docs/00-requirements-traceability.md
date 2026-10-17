@@ -9,8 +9,9 @@
 | 不得是黑盒子 | [04 §1、§6](04-research-loop.md) | `core/loop.py`、`observe/` | 即時主控台、`--step`、`trace show`、`timeline.html` | ✅ |
 | 定義目標 → 決定需要資訊 | `DEFINE_GOAL`、`PLAN_INFO_NEEDS` | `core/steps.py`、`llm/roles.py` | trace 中的 `ResearchGoal`、`InfoNeed[]` 與 LLM 結構化輸出 | ✅ |
 | 調用 Tool → 解析結果 | `SELECT_ACTION`、`EXECUTE_TOOL`、`PARSE_RESULT` | `core/steps.py`、`core/actions.py`、`tools/` | 每個行動的評分明細、HTTP 請求、觀察 ID | ✅ |
-| 形成假設 → 尋找客觀證據 | `FORM_HYPOTHESES`、`SEEK_EVIDENCE` | `core/beliefs.py` | 假設、鑑別行動 | ⬜ Phase 3 |
-| 修正推論 → 決定下一步 | `REVISE_BELIEFS`、`DECIDE_NEXT` | `core/beliefs.py`、`core/steps.py` | 信心度曲線、結束理由 | 🔄 `DECIDE_NEXT` 完成；`REVISE_BELIEFS` 於 Phase 3 |
+| 形成假設 → 尋找客觀證據 | `FORM_HYPOTHESES`、`SEEK_EVIDENCE` | `core/beliefs.py`、`core/probes.py`、`core/digest.py` | 可證偽檢查、6 種證據探針、判定依據逐筆列出 | ✅ |
+| 修正推論 → 決定下一步 | `REVISE_BELIEFS`、`DECIDE_NEXT` | `core/beliefs.py`、`core/steps.py` | log-odds 信心曲線（每筆證據一階）、紅隊驗證、結束理由 | ✅ |
+| 結論可追溯（非黑盒子） | `REPORT` | `core/claims.py` | 結構化主張由程式推導；報告引用逐一驗證；`report.md` | ✅ |
 | 成本控制：數萬頁中決定優先抓取 | [04 §4](04-research-loop.md) | `core/frontier.py`、`core/budget.py` | 2 萬頁網站只抓 57 次即找到答案；timeline 範本統計 | ✅ |
 | 時間 / Token / API 限制 | [04 §4.5–4.6](04-research-loop.md) | `core/budget.py`、`llm/anthropic_client.py` | 預算曲線；所有情境驗證額度未被動用（測試） | ✅ |
 | 框架選擇說明 | [02 §3](02-seo-intel-agent-design.md) | — | — | ✅ |
@@ -30,7 +31,7 @@
 
 | 需求 | 設計 | 模組 | 觀察 / 驗證 | 狀態 |
 |---|---|---|---|---|
-| 失效模式：反爬、幻覺、Tool 崩潰、錯誤經驗 | [06 §1](06-reliability-and-autonomy.md) F1–F4 | `tools/base.py`、`report/`、`memory/governance.py` | 06 §3 測試矩陣 | ⬜ |
+| 失效模式：反爬、幻覺、Tool 崩潰、錯誤經驗 | [06 §1](06-reliability-and-autonomy.md) F1–F4 | `tools/http.py`、`core/claims.py`、`memory/governance.py` | 06 §3 測試矩陣 | 🔄 反爬（F1）、幻覺防護（F2：引用驗證、數字由程式算、紅隊）、工具崩潰（F3）已實作並測試；錯誤經驗（F4）於 Phase 4 |
 | 其他失效模式 | F5–F7 | 各模組 | 同上 | ⬜ |
 | 可 100% 自主的動作 | [06 §2.2](06-reliability-and-autonomy.md) | `core/policy.py` | 測試矩陣 | ⬜ |
 | 高風險動作須暫停等待人工核准 | 同上「需核准」 | `core/policy.py`、`cli.py` | 暫停 → 核准 → 續跑測試；主控台顯示擋下理由 | ⬜ |

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from seo_intel.core.models import EpisodeState, Step
 
-_AFTER_DECIDE = {"continue": Step.SELECT_ACTION, "pivot": Step.PLAN_INFO_NEEDS, "finish": Step.REPORT}
+_AFTER_DECIDE = {"continue": Step.SELECT_ACTION, "form": Step.FORM_HYPOTHESES, "seek": Step.SEEK_EVIDENCE,
+                 "revise": Step.REVISE_BELIEFS, "finish": Step.REPORT}
 
 
 def next_step(state: EpisodeState) -> Step:
@@ -21,8 +22,12 @@ def next_step(state: EpisodeState) -> Step:
         return Step.EXECUTE_TOOL if state.pending is not None else Step.DECIDE_NEXT
     if last == Step.EXECUTE_TOOL:
         return Step.PARSE_RESULT
-    if last == Step.PARSE_RESULT:
+    if last in (Step.PARSE_RESULT, Step.REVISE_BELIEFS):
         return Step.DECIDE_NEXT
+    if last == Step.FORM_HYPOTHESES:
+        return Step.SEEK_EVIDENCE
+    if last == Step.SEEK_EVIDENCE:
+        return Step.SELECT_ACTION if state.evidence_queue else Step.REVISE_BELIEFS
     if last == Step.DECIDE_NEXT:
         return _AFTER_DECIDE[state.decision or "continue"]
     return Step.DONE   # REPORT 之後（Phase 4 加入 REFLECT）

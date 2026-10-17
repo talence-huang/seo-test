@@ -61,6 +61,82 @@ def _breakdown(parts: dict[str, float]) -> str:
     return "　".join(shown) or "—"
 
 
+_HYP_COLORS = ("#534AB7", "#0F6E56", "#D85A30", "#993556", "#185FA5", "#854F0B", "#5F5E5A", "#3B6D11")
+_STATUS_ZH = {"proposed": "提出", "testing": "測試中", "supported": "成立", "refuted": "推翻",
+              "inconclusive": "無結論", "rejected": "拒收"}
+
+
+def _belief_svg(history: list[dict], hypotheses: list[dict]) -> str:
+    """每個假設的信心隨證據累積的變化（橫軸＝第幾筆證據）；虛線為「成立」(0.8) 與「推翻」(0.2) 門檻。"""
+    if not history:
+        return ""
+    w, h, pad = 1100, 260, 34
+    n = len(history)
+    x = lambda i: pad + (w - 2 * pad) * i / max(1, n - 1)  # noqa: E731
+    y = lambda p: h - pad - (h - 2 * pad) * p  # noqa: E731
+    lines, legend = [], []
+    for k, hyp in enumerate(hy for hy in hypotheses if hy["status"] != "rejected"):
+        pts = [(i, p) for i, p in enumerate(history) if p["hypothesis_id"] == hyp["id"]]
+        if not pts:
+            continue
+        color = _HYP_COLORS[k % len(_HYP_COLORS)]
+        steps = []   # 階梯線：信心只在套用證據時改變
+        for j, (i, p) in enumerate(pts):
+            if j:
+                steps.append(f"{x(i):.1f},{y(pts[j - 1][1]['posterior']):.1f}")
+            steps.append(f"{x(i):.1f},{y(p['posterior']):.1f}")
+        dots = "".join(f'<circle cx="{x(i):.1f}" cy="{y(p["posterior"]):.1f}" r="3" fill="{color}">'
+                       f'<title>{_e(hyp["id"])} {_e(p.get("evidence_id") or "先驗")}：{p["posterior"]:.2f}</title></circle>'
+                       for i, p in pts)
+        lines.append(f'<polyline points="{" ".join(steps)}" fill="none" stroke="{color}" stroke-width="2"/>{dots}')
+        legend.append(f'<span style="color:{color}">■ {_e(hyp["id"])} {_e(hyp.get("template") or "全站因素")}'
+                      f'（{_STATUS_ZH[hyp["status"]]} {hyp["posterior"]:.2f}）</span>')
+    guides = "".join(f'<line x1="{pad}" x2="{w - pad}" y1="{y(v):.1f}" y2="{y(v):.1f}" stroke="currentColor" '
+                     f'stroke-dasharray="4 4" opacity="0.35"/><text x="2" y="{y(v) + 4:.1f}">{v}</text>'
+                     for v in (0.2, 0.8))
+    return (f'<div class="meta">{" ".join(legend)}</div><div class="wrap"><svg viewBox="0 0 {w} {h}" width="100%" '
+            f'role="img" aria-label="假設信心隨步驟變化">{guides}{"".join(lines)}'
+            f'<text x="2" y="{y(1) + 4:.1f}">1.0</text><text x="2" y="{y(0) + 4:.1f}">0</text></svg></div>')
+
+
+def _research_sections(state: dict) -> str:
+    claims = state.get("claims", [])
+    hyps = state.get("hypotheses", [])
+    evidence = state.get("evidence", [])
+    if not hyps:
+        return ""
+    report = state.get("report") or {}
+    claim_rows = "".join(
+        f"<tr><td>{_e(c['id'])}</td><td>{_e(c['subject_site'])}</td><td><code>{_e(c['template_prefix'])}</code></td>"
+        f"<td>{_e(', '.join(c['change_types']))}</td><td>{_e(' ～ '.join(c['date_window'] or []))}</td>"
+        f"<td>{c['confidence']:.2f}</td><td>{_e(', '.join(c['evidence_ids']))}</td>"
+        f"<td class='{'ok' if c['validated'] else 'warn'}'>{'✓' if c['validated'] else '✗'}</td></tr>" for c in claims)
+    claims_html = (f"<table><tr><th>主張</th><th>網站</th><th>範本</th><th>變動類型</th><th>時間窗</th><th>信心</th>"
+                   f"<th>證據</th><th>驗證</th></tr>{claim_rows}</table>") if claims else "<p class='muted'>沒有假設達到成立門檻。</p>"
+    hyp_rows = "".join(
+        f"<tr><td>{_e(h['id'])}</td><td><code>{_e(h['category'])}</code></td><td>{_e(h.get('template') or '—')}</td>"
+        f"<td>{_e(h['statement'])}<div class='muted'>預測：{_e(h['prediction'])}<br>反證：{_e(h['falsification'])}</div></td>"
+        f"<td>{h['prior']:.2f} → <b>{h['posterior']:.2f}</b></td><td>{_STATUS_ZH[h['status']]}"
+        f"{'（已紅隊驗證）' if h.get('verified') else ''}{'<br><span class=warn>' + _e(h['note']) + '</span>' if h.get('note') else ''}</td></tr>"
+        for h in hyps)
+    ev_rows = "".join(
+        f"<tr><td>{_e(e['id'])}</td><td>{_e(e['hypothesis_id'])}</td><td><code>{_e(e['probe'])}</code></td>"
+        f"<td class='{'ok' if e['direction'] == 'for' else 'warn'}'>{'支持' if e['direction'] == 'for' else '反對'}</td>"
+        f"<td>{_e(e['strength'])}</td><td>{_e(', '.join(e['observation_ids']))}</td><td>{_e(e['note'])}</td></tr>"
+        for e in evidence)
+    cit = report.get("citations", {})
+    head = (f"<p><b>{_e(report.get('headline', ''))}</b></p><p>{_e(report.get('summary', ''))}</p>"
+            + (f"<p class='muted'>混淆因子：{_e(report['confounder'])}</p>" if report.get("confounder") else "")
+            + (f"<p class='muted'>引用驗證：有效 {cit.get('valid', 0)}、移除無效引用 {cit.get('invalid_removed', 0)}</p>" if cit else ""))
+    return (f"<h2>結論（程式由證據推導的結構化主張）</h2>{head}<div class='wrap'>{claims_html}</div>"
+            f"<h2>假設信心隨證據累積的變化（橫軸＝第幾筆證據；滑鼠移到點上看證據 ID；虛線：成立 0.8／推翻 0.2）</h2>"
+            f"{_belief_svg(state.get('belief_history', []), hyps)}"
+            f"<h2>假設</h2><div class='wrap'><table><tr><th>ID</th><th>類別</th><th>範本</th><th>主張、預測與反證</th>"
+            f"<th>先驗 → 信心</th><th>狀態</th></tr>{hyp_rows}</table></div>"
+            f"<h2>證據（{len(evidence)}）</h2><div class='wrap'><table><tr><th>ID</th><th>假設</th><th>探針</th><th>方向</th>"
+            f"<th>強度</th><th>觀察</th><th>判定依據</th></tr>{ev_rows}</table></div>")
+
+
 def _step_row(r: StepRecord) -> str:
     color = _PHASE_COLOR.get(r.phase, "#888")
     inner = []
@@ -118,6 +194,7 @@ def render_timeline(records: list[StepRecord], state: dict, frontier: dict | Non
 競品 {_e(', '.join(task['competitors']))} · 研究期間 {_e(goal.get('window_start'))} ～ {_e(goal.get('window_end'))} ·
 關鍵字 {_e(', '.join(goal.get('topic_keywords', [])))}</div>
 <div class="cards">{''.join(f'<div class="card"><span>{_e(k)}</span><b>{_e(v)}</b></div>' for k, v in cards)}</div>
+{_research_sections(state)}
 <h2>資訊需求</h2><div class="wrap"><table><tr><th>ID</th><th>類型</th><th>優先</th><th>目標網域</th><th>問題</th><th>狀態</th><th>解答</th></tr>{needs}</table></div>
 <h2>抓取預算隨步驟累積（底色＝階段）</h2>{_budget_svg(records, cap)}
 <h2>範本統計（Frontier）{excluded}</h2><div class="wrap"><table><tr><th>範本</th><th>URL 數</th><th>期間內更新</th><th>已抓取</th><th>證據</th><th>證據率</th><th>封鎖</th><th>陷阱</th></tr>{tpl_rows}</table></div>

@@ -12,11 +12,32 @@ from collections import Counter
 from datetime import date, timedelta
 from urllib.parse import urlsplit
 
+from seo_intel.core import beliefs, probes
 from seo_intel.core.actions import COMPONENT_LABELS, compute_phase, generate
+from seo_intel.core.claims import confounder_note, derive_claims, render_markdown, validate_citations
 from seo_intel.core.context import EpisodeContext, StepOutcome, llm_record
+from seo_intel.core.digest import hypotheses_digest, observation_digest
 from seo_intel.core.frontier import Frontier, normalize_url, template_key
-from seo_intel.core.models import InfoNeed, Phase, ResearchGoal, TaskInput
-from seo_intel.llm.roles import PLANNER_SYSTEM, GoalOut, PlanOut, goal_prompt, plan_prompt
+from seo_intel.core.models import EvidenceItem, Hypothesis, InfoNeed, Phase, ResearchGoal, TaskInput
+from seo_intel.llm.roles import (
+    EVIDENCE_SYSTEM,
+    HYPOTHESIZER_SYSTEM,
+    PLANNER_SYSTEM,
+    REPORTER_SYSTEM,
+    VERIFIER_SYSTEM,
+    GoalOut,
+    HypothesesOut,
+    PlanOut,
+    ProbePlanOut,
+    ReportOut,
+    VerifierOut,
+    evidence_prompt,
+    goal_prompt,
+    hypotheses_prompt,
+    plan_prompt,
+    report_prompt,
+    verifier_prompt,
+)
 from seo_intel.llm.types import LLMError
 from seo_intel.tools.extract import PageFeatures
 from seo_intel.tools.history import history_diff
@@ -31,11 +52,11 @@ ON_TOPIC_OVERLAP = 0.75
 
 # ---------- 共用 ----------
 
-def _call_llm(ctx: EpisodeContext, role: str, user: str, schema, retries: int = 1):
+def _call_llm(ctx: EpisodeContext, role: str, user: str, schema, retries: int = 1, system: str = PLANNER_SYSTEM):
     records: list[dict] = []
     for attempt in range(retries + 1):
         try:
-            res = ctx.llm.call(role, system=PLANNER_SYSTEM, user=user, schema=schema)
+            res = ctx.llm.call(role, system=system, user=user, schema=schema)
         except LLMError as e:
             ctx.ledger.charge_llm(e.meta)
             records.append(llm_record(e.meta, error=f"{type(e).__name__}: {e}") | {"role": role})
@@ -187,8 +208,42 @@ def _score_line(breakdown: dict[str, float]) -> str:
     return " ".join(parts)
 
 
+def _select_evidence_action(ctx: EpisodeContext) -> StepOutcome:
+    """證據佇列優先：使用保留給驗證的預算。"""
+    st = ctx.state
+    st.phase = Phase.VERIFICATION
+    skipped = []
+    while st.evidence_queue:
+        a = st.evidence_queue.pop(0)
+        if a.tool in ("fetch", "discover") and ctx.ledger.fetch_room(Phase.VERIFICATION) <= 0:
+            probes.drop_action(ctx, a, "驗證抓取額度已用完")
+            skipped.append(f"✗ 略過 {a.label()}：驗證抓取額度已用完")
+            continue
+        v = ctx.policy.check(a)
+        if v.decision == "deny":
+            probes.drop_action(ctx, a, f"政策拒絕：{v.reason}")
+            skipped.append(f"✗ 拒絕 {a.label()}：{v.reason}")
+            continue
+        if v.decision == "require_approval":
+            st.evidence_queue.insert(0, a)
+            st.status = "waiting_approval"
+            st.approval_request = {"action": a.model_dump(mode="json"), "rule": v.rule, "reason": v.reason}
+            return StepOutcome(summary=f"暫停：{a.label()} 需要人工核准", details=[f"規則 {v.rule}：{v.reason}"],
+                               decision={"phase": st.phase, "approval": st.approval_request}, reason=v.reason)
+        st.pending = a
+        ctx.scratch["no_candidates"] = False
+        details = [f"理由：{a.reason}", f"證據佇列剩餘 {len(st.evidence_queue)} 個行動"] + skipped
+        return StepOutcome(summary=_short(a.label()), details=details, reason=a.reason,
+                           decision={"phase": st.phase, "action": a.model_dump(mode="json"), "evidence_queue": True})
+    st.pending = None
+    ctx.scratch["no_candidates"] = False
+    return StepOutcome(summary="證據佇列已清空", details=skipped, decision={"phase": st.phase})
+
+
 def select_action(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
+    if st.evidence_queue:
+        return _select_evidence_action(ctx)
     previous = st.phase
     st.phase = compute_phase(ctx)
     cands = generate(ctx, st.phase)
@@ -471,6 +526,7 @@ def _parse_history(ctx: EpisodeContext, raw: dict, out: StepOutcome) -> None:
     url = raw["url"]
     info = st.fetched[url]
     info["diffed"] = True
+    info["diff_status"] = raw["status"]
     tkey = info["template"]
     if raw["status"] == "ok":
         summary = (f"{_short(url)}：{raw['snapshot_date']} → 目前，字數 {raw['words_before']}→{raw['words_after']}"
@@ -498,63 +554,318 @@ def parse_result(ctx: EpisodeContext) -> StepOutcome:
     else:
         {"rank_scan": _parse_rank, "serp_scan": _parse_serp, "discover": _parse_discover, "fetch": _parse_fetch,
          "history_diff": _parse_history}[st.pending.tool](ctx, raw, out)
+    if st.pending.probe_id:
+        probes.on_action_done(ctx, st.pending, out.observations)
+        p = st.probe(st.pending.probe_id)
+        out.details.append(f"{p.id} [{probes.CATALOG[p.kind].label}] 狀態：{p.status}"
+                           + (f"（尚有 {len(p.pending)} 個行動）" if p.pending else ""))
     st.pending = None
     return out
 
 
+# ---------- FORM_HYPOTHESES ----------
+
+MAX_HYPOTHESIS_ROUNDS = 2
+MAX_SEEK_ROUNDS = 2
+MAX_VERIFY_PER_REVISE = 2
+STATUS_ZH = {"proposed": "提出", "testing": "測試中", "supported": "成立", "refuted": "推翻",
+             "inconclusive": "無結論", "rejected": "拒收"}
+STRENGTH_ZH = {"weak": "弱", "moderate": "中", "strong": "強"}
+
+
+def form_hypotheses(ctx: EpisodeContext) -> StepOutcome:
+    st = ctx.state
+    st.hypothesis_round += 1
+    st.seek_rounds = 0
+    digest = observation_digest(ctx)
+    refuted = [{"id": h.id, "statement": h.statement, "status": h.status, "posterior": h.posterior, "note": h.note}
+               for h in st.hypotheses if h.status in ("refuted", "rejected")]
+    user = hypotheses_prompt(st.task, st.goal, digest, refuted, ctx.scratch.get("hypothesis_lessons"))
+    out, records, error = _call_llm(ctx, "hypothesizer", user, HypothesesOut, system=HYPOTHESIZER_SYSTEM)
+    known = set(digest["known_templates"])
+    details, new = [], []
+    for raw in (out.hypotheses[:4] if out else []):
+        fields, reason = beliefs.validate({
+            "category": raw.category, "statement": raw.statement, "subject_site": raw.subject_site,
+            "template": raw.template, "mechanism": raw.mechanism, "prediction": raw.prediction,
+            "falsification": raw.falsification, "cited": raw.cited_observations, "prior": raw.prior}, st, known)
+        h = Hypothesis(id=f"H{len(st.hypotheses) + 1}", round=st.hypothesis_round, category=fields["category"],
+                       statement=fields["statement"], subject_site=fields["subject_site"], template=fields["template"],
+                       mechanism=fields["mechanism"], prediction=fields["prediction"],
+                       falsification=fields["falsification"], cited=fields["cited"], prior=fields["prior"],
+                       posterior=fields["prior"], status="rejected" if reason else "testing",
+                       note=reason or fields["note"])
+        st.hypotheses.append(h)
+        new.append(h)
+        if h.status != "rejected":
+            beliefs.record_point(st, h, None)
+        if reason:
+            details.append(f"✗ {h.id} 拒收（{reason}）：{h.statement}")
+        else:
+            details += [f"{h.id} [{h.category}] {h.template or '全站'}，先驗 {h.prior:.2f}：{h.statement}",
+                        f"    預測：{h.prediction}",
+                        f"    反證：{h.falsification}（引用 {', '.join(h.cited)}）"]
+    if out:
+        details.append(f"推理摘要：{out.reasoning_summary}")
+    n_ok = sum(1 for h in new if h.status == "testing")
+    return StepOutcome(summary=f"第 {st.hypothesis_round} 輪：提出 {n_ok} 個可檢驗的假設（拒收 {len(new) - n_ok} 個）",
+                       details=details, decision={"round": st.hypothesis_round,
+                                                  "hypotheses": [h.model_dump(mode="json") for h in new]},
+                       llm=records, reason=error)
+
+
+# ---------- SEEK_EVIDENCE ----------
+
+def _catalog(kinds) -> dict:
+    return {k: {"label": probes.CATALOG[k].label, "cost": probes.CATALOG[k].cost,
+                "applies_to": sorted(probes.CATALOG[k].applies), "description": probes.CATALOG[k].description}
+            for k in kinds}
+
+
+def seek_evidence(ctx: EpisodeContext) -> StepOutcome:
+    st = ctx.state
+    st.seek_rounds += 1
+    testing = [h for h in st.hypotheses if h.status == "testing"]
+    planned, details, records, error = [], [], [], None
+    for kind in probes.FREE:
+        p = probes.plan(ctx, kind, testing, "system", "免費探針：只用既有觀察，一律執行")
+        if p:
+            planned.append(p)
+    if testing and ctx.ledger.fetch_room(Phase.VERIFICATION) > 0:
+        budget = {"verification_fetches_left": ctx.ledger.fetch_room(Phase.VERIFICATION),
+                  "api_calls_left": ctx.settings.budget.max_api_calls - st.budget.api_calls,
+                  "llm_usd_left": round(ctx.ledger.llm_left(), 4)}
+        out, records, error = _call_llm(ctx, "planner", evidence_prompt(hypotheses_digest(ctx), _catalog(probes.COSTLY),
+                                                                         budget), ProbePlanOut, system=EVIDENCE_SYSTEM)
+        if out:
+            details.append(f"鑑別問題：{out.discriminating_question}")
+            for req in out.probes:
+                h = st.hypothesis(req.hypothesis_id)
+                if h is None or h.status != "testing":
+                    details.append(f"✗ 忽略 {req.probe}：{req.hypothesis_id} 不是測試中的假設")
+                    continue
+                p = probes.plan(ctx, req.probe, [h], "planner", req.rationale)
+                if p:
+                    planned.append(p)
+    for p in planned:
+        how = f"排入 {len(p.pending)} 個行動" if p.pending else "以既有觀察判定"
+        why = f"（{p.rationale}）" if p.requested_by != "system" else ""
+        details.append(f"{p.id} [{probes.CATALOG[p.kind].label}] → {', '.join(p.hypothesis_ids)}：{how}{why}")
+    return StepOutcome(summary=f"規劃 {len(planned)} 個證據探針；證據佇列 {len(st.evidence_queue)} 個行動",
+                       details=details, decision={"probes": [p.model_dump(mode="json") for p in planned]},
+                       llm=records, reason=error)
+
+
+# ---------- REVISE_BELIEFS ----------
+
+MAX_SCORED_OBJECTIONS = 2   # 單次紅隊審查最多計入 2 項反駁（一中一弱），其餘只記錄：紅隊的價值在找漏洞，不在以數量壓倒證據
+
+
+def _excerpt(o) -> dict:
+    """給紅隊核對計算用的資料節錄（不只摘要）。"""
+    d = o.data
+    if o.kind in ("rank_change", "rank_control"):
+        return {"aggregate": d.get("aggregate")}
+    if o.kind == "serp_shift":
+        return {"movement": d.get("movement", [])[:6], "target_urls_after": d.get("target_urls_after")}
+    if o.kind == "site_inventory":
+        return {"templates": d.get("templates")}
+    if o.kind == "page_diff":
+        return {k: d.get(k) for k in ("status", "snapshot_date", "current_modified", "words_change_pct", "change_types")}
+    if o.kind == "page":
+        return {k: d.get(k) for k in ("modified", "published", "words", "schema", "faq", "new_page")}
+    return {}
+
+
+def _red_team(ctx: EpisodeContext, h: Hypothesis) -> tuple[list[dict], list[str]]:
+    st = ctx.state
+    hd = next(d for d in hypotheses_digest(ctx, include_reasoning=False) if d["id"] == h.id)
+    wanted = {o for e in st.evidence_for(h.id) for o in e.observation_ids} | set(h.cited)
+    observations = [{"id": o.id, "kind": o.kind, "summary": o.summary, "data": _excerpt(o)} for o in st.observations
+                    if o.id in wanted or o.kind in ("rank_change", "rank_control", "serp_shift", "site_inventory")]
+    out, records, error = _call_llm(ctx, "verifier", verifier_prompt(hd, observations, _catalog(probes.CATALOG)),
+                                    VerifierOut, system=VERIFIER_SYSTEM)
+    if out is None:
+        return records, [f"紅隊驗證 {h.id} 失敗：{error}（假設無法標記為成立）"]
+    h.verified = True
+    lines = [f"紅隊驗證 {h.id}：{ {'holds': '成立', 'weak': '薄弱', 'fails': '不成立'}[out.assessment]} — {out.summary}"]
+    grounded = []
+    for obj in out.objections:
+        cited = [o for o in obj.cited_observations if st.observation(o)]
+        if cited:
+            grounded.append((obj, cited))
+        else:
+            lines.append(f"    ✗ 不計分（未引用有效觀察）：{obj.text}")
+    grounded.sort(key=lambda x: x[0].severity != "major")   # 嚴重的優先計分
+    for i, (obj, cited) in enumerate(grounded):
+        if i >= MAX_SCORED_OBJECTIONS:
+            lines.append(f"    · 記錄但不計分（單次審查最多計入 {MAX_SCORED_OBJECTIONS} 項）：{obj.text}")
+            continue
+        strength = "moderate" if i == 0 and obj.severity == "major" else "weak"
+        ev = EvidenceItem(id=f"EV-{len(st.evidence) + 1}", hypothesis_id=h.id, probe="red_team", direction="against",
+                          strength=strength, observation_ids=cited, note=obj.text, source="verifier", seq=st.seq + 1)
+        st.evidence.append(ev)
+        beliefs.record_point(st, h, ev.id)
+        lines.append(f"    {ev.id} 反對（{STRENGTH_ZH[ev.strength]}）：{obj.text}（{', '.join(cited)}）")
+    for name in out.requested_probes:
+        if name in probes.CATALOG:
+            p = probes.plan(ctx, name, [h], "verifier", "紅隊要求")
+            if p:
+                lines.append(f"    紅隊要求 {p.id} [{probes.CATALOG[p.kind].label}]："
+                             + (f"排入 {len(p.pending)} 個行動" if p.pending else "以既有觀察判定"))
+    return records, lines
+
+
+def revise_beliefs(ctx: EpisodeContext) -> StepOutcome:
+    st = ctx.state
+    details, records = [], []
+    for p in [p for p in st.probes if p.status == "executed"]:
+        drafts = probes.evaluate(ctx, p)
+        p.status = "evaluated"
+        label = probes.CATALOG[p.kind].label
+        if not drafts:
+            details.append(f"{p.id} [{label}]：資料不足或結果不具鑑別力，不計入證據" + (f"（{p.note}）" if p.note else ""))
+        for d in drafts:
+            if d.direction == "none":
+                details.append(f"{p.id} [{label}] → {d.hypothesis_id}：{d.note}")
+                continue
+            ev = EvidenceItem(id=f"EV-{len(st.evidence) + 1}", hypothesis_id=d.hypothesis_id, probe=p.kind,
+                              direction=d.direction, strength=d.strength, observation_ids=d.observation_ids,
+                              note=d.note, seq=st.seq + 1)
+            st.evidence.append(ev)
+            beliefs.record_point(st, st.hypothesis(ev.hypothesis_id), ev.id)
+            details.append(f"{ev.id} → {ev.hypothesis_id} {'支持' if ev.direction == 'for' else '反對'}"
+                           f"（{STRENGTH_ZH[ev.strength]}）[{label}]：{d.note}")
+    details += beliefs.refresh(st)
+    for h in [h for h in st.hypotheses if h.status == "testing" and not h.verified
+              and h.posterior >= beliefs.VERIFY_AT][:MAX_VERIFY_PER_REVISE]:
+        recs, lines = _red_team(ctx, h)
+        records += recs
+        details += lines
+        details += beliefs.refresh(st)
+    live = [h for h in st.hypotheses if h.status != "rejected"]
+    summary = "；".join(f"{h.id} {h.posterior:.2f}（{STATUS_ZH[h.status]}）" for h in live) or "沒有可檢驗的假設"
+    return StepOutcome(summary=f"信心：{summary}", details=details, llm=records,
+                       decision={"hypotheses": {h.id: {"posterior": h.posterior, "status": h.status} for h in live}})
+
+
 # ---------- DECIDE_NEXT ----------
+
+_HARD_STOPS = ("max_llm_usd", "max_wall_time_s", "max_actions", "max_iterations")
+
 
 def decide_next(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
     out = StepOutcome(summary="")
     must_open = lambda: [n for n in st.info_needs if n.must_answer and n.status == "open"]  # noqa: E731
+    no_candidates = ctx.scratch.pop("no_candidates", False)
 
-    if st.phase == Phase.TARGETED and len(st.fetch_yield) >= DIMINISHING_WINDOW \
-            and sum(st.fetch_yield[-DIMINISHING_WINDOW:]) == 0:
-        for n in st.needs_of("page_changes"):
-            _resolve(n, f"最近 {DIMINISHING_WINDOW} 次抓取沒有新證據（報酬遞減）", out, "exhausted")
-    if ctx.scratch.pop("no_candidates", False):
-        why = ("定向抓取額度已用完（驗證額度保留給 Phase 3）" if st.phase == Phase.VERIFICATION
-               else f"階段 {st.phase.value} 沒有可執行的行動")
-        for n in [n for n in st.info_needs if n.status == "open"]:
-            _resolve(n, why, out, "exhausted")
+    if not st.hypotheses:   # 蒐集階段（Phase 2 的規則）
+        if st.phase == Phase.TARGETED and len(st.fetch_yield) >= DIMINISHING_WINDOW \
+                and sum(st.fetch_yield[-DIMINISHING_WINDOW:]) == 0:
+            for n in st.needs_of("page_changes"):
+                _resolve(n, f"最近 {DIMINISHING_WINDOW} 次抓取沒有新證據（報酬遞減）", out, "exhausted")
+        if no_candidates:
+            why = ("定向抓取額度已用完（剩餘額度保留給驗證）" if st.phase == Phase.VERIFICATION
+                   else f"階段 {st.phase.value} 沒有可執行的行動")
+            for n in [n for n in st.info_needs if n.status == "open"]:
+                _resolve(n, why, out, "exhausted")
 
-    if (r := ctx.ledger.exhausted_reason()) is not None:
-        st.decision, st.end_reason = "finish", f"budget:{r}"
-    elif not must_open():
-        gaps = any(n.status == "exhausted" for n in st.info_needs if n.must_answer)
-        st.decision, st.end_reason = "finish", "needs_closed_with_gaps" if gaps else "all_needs_answered"
-    else:
+    stop = ctx.ledger.exhausted_reason()
+    executed = [p for p in st.probes if p.status == "executed"]
+    testing = [h for h in st.hypotheses if h.status == "testing"]
+    supported = [h for h in st.hypotheses if h.status == "supported"]
+    live = [h for h in st.hypotheses if h.status != "rejected"]
+    if stop in _HARD_STOPS:
+        st.decision, st.end_reason = ("revise", None) if executed else ("finish", f"budget:{stop}")
+    elif st.evidence_queue and stop is None:
         st.decision = "continue"
+    elif executed:
+        st.decision = "revise"
+    elif not st.hypotheses and st.hypothesis_round == 0:
+        if must_open() and not no_candidates and stop is None:
+            st.decision = "continue"
+        elif st.observations:
+            st.decision = "form"
+        else:
+            st.decision, st.end_reason = "finish", "no_observations"
+    elif not st.hypotheses:   # 已嘗試形成假設但沒有任何產出（例如 LLM 失敗）：有限次重試，不可無限迴圈
+        if st.hypothesis_round < MAX_HYPOTHESIS_ROUNDS:
+            st.decision = "form"
+        else:
+            st.decision, st.end_reason = "finish", "no_valid_hypotheses"
+    elif testing and st.seek_rounds < MAX_SEEK_ROUNDS:
+        st.decision = "seek"
+    elif not supported and not testing and st.hypothesis_round < MAX_HYPOTHESIS_ROUNDS:
+        st.decision = "form"   # 所有假設都被推翻或拒收：重新提出
+    else:
+        st.decision, st.end_reason = "finish", ("hypothesis_supported" if supported else "inconclusive")
+    if st.evidence_queue and stop is not None and stop not in _HARD_STOPS:
+        for a in st.evidence_queue:
+            probes.drop_action(ctx, a, "抓取預算已用完")
+        st.evidence_queue = []
+
+    labels = {"continue": "繼續", "form": "形成假設", "seek": "尋找證據", "revise": "修正推論"}
     if st.decision == "finish":
         out.summary = f"結束：{st.end_reason}"
+    elif st.decision == "continue" and not st.hypotheses:
+        out.summary = f"繼續（階段 {st.phase.value}；待解答 {', '.join(n.id for n in must_open())}）"
+    elif st.decision == "continue":
+        out.summary = f"繼續執行證據佇列（剩 {len(st.evidence_queue)} 個）"
     else:
-        open_ids = ", ".join(n.id for n in must_open())
-        out.summary = f"繼續（階段 {st.phase.value}；待解答 {open_ids}）"
+        out.summary = f"下一步：{labels[st.decision]}"
+        if st.decision == "form" and live:
+            out.details.append("所有假設都已推翻或拒收，重新提出假設")
     out.decision = {"decision": st.decision, "end_reason": st.end_reason, "phase": st.phase,
-                    "needs": {n.id: n.status for n in st.info_needs}}
+                    "needs": {n.id: n.status for n in st.info_needs},
+                    "hypotheses": {h.id: h.status for h in st.hypotheses}}
     return out
 
 
-# ---------- REPORT（Phase 2：確定性摘要；Phase 3 改為假設與結論）----------
+# ---------- REPORT ----------
 
 def report(ctx: EpisodeContext) -> StepOutcome:
     st = ctx.state
-    details = [f"{n.id} [{n.kind}] {n.status}：{n.resolution or '—'}" for n in st.info_needs]
-    ranked = sorted(st.template_changes.items(), key=lambda kv: -len(set(kv[1])))[:3]
-    details += [f"變動範本 {tkey}：{len(set(urls))} 頁" for tkey, urls in ranked]
+    for h in st.hypotheses:
+        if h.status == "testing":
+            h.status = "inconclusive"
+    claims = derive_claims(ctx)
+    st.claims = claims
+    confounder = confounder_note(st)
+    records, error, raw = [], None, None
+    if st.goal is not None:
+        out, records, error = _call_llm(ctx, "reporter", report_prompt(
+            st.task, st.goal, [c.model_dump(mode="json") for c in claims], hypotheses_digest(ctx), confounder),
+            ReportOut, system=REPORTER_SYSTEM)
+        raw = out.model_dump() if out else None
+    raw = raw or {"headline": "", "summary": f"（報告敘述產生失敗：{error}）", "findings": [], "excluded": [],
+                  "caveats": [], "recommendations": []}
+    cleaned, stats = validate_citations(raw, st, claims)
+    st.report = {**cleaned, "citations": stats, "confounder": confounder}
+    if st.goal is not None:
+        (ctx.run_dir / "report.md").write_text(render_markdown(st, claims, cleaned, stats, confounder), encoding="utf-8")
     b = st.budget
-    details.append(f"花費：抓取 {b.fetches} 次、API {b.api_calls} 次、LLM US${b.llm_usd:.4f}、行動 {b.actions} 個")
-    summary_path = ctx.run_dir / "summary.json"
-    summary_path.write_text(json.dumps({
-        "episode": st.id, "end_reason": st.end_reason, "goal": st.goal.model_dump(mode="json") if st.goal else None,
-        "info_needs": [n.model_dump(mode="json") for n in st.info_needs],
-        "template_changes": {k: sorted(set(v)) for k, v in st.template_changes.items()},
-        "serp_gainers": st.serp_gainers, "budget": b.model_dump(),
+    (ctx.run_dir / "summary.json").write_text(json.dumps({
+        "episode": st.id, "scenario": st.task.scenario, "end_reason": st.end_reason,
+        "goal": st.goal.model_dump(mode="json") if st.goal else None,
+        "claims": [c.model_dump(mode="json") for c in claims],
+        "hypotheses": [h.model_dump(mode="json") for h in st.hypotheses],
+        "evidence": [e.model_dump(mode="json") for e in st.evidence],
+        "report": st.report, "info_needs": [n.model_dump(mode="json") for n in st.info_needs],
+        "budget": b.model_dump(),
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     st.status = "done"
-    return StepOutcome(summary=f"研究摘要（結束原因：{st.end_reason}；尚未形成假設，Phase 3 加入）", details=details,
-                       decision={"end_reason": st.end_reason})
+    details = [f"{c.id} {c.subject_site}{c.template_prefix}：{', '.join(c.change_types)}，信心 {c.confidence:.2f}，"
+               f"證據 {', '.join(c.evidence_ids)}{'' if c.validated else '（未通過驗證）'}" for c in claims]
+    details += [f"{h.id} {STATUS_ZH[h.status]}（{h.posterior:.2f}）：{h.statement}" for h in st.hypotheses
+                if h.status != "supported"]
+    if confounder:
+        details.append(f"混淆因子：{confounder}")
+    details.append(f"引用驗證：有效 {stats['valid']}、移除無效引用 {stats['invalid_removed']}")
+    details.append(f"花費：抓取 {b.fetches} 次、API {b.api_calls} 次、LLM US${b.llm_usd:.4f}、行動 {b.actions} 個")
+    return StepOutcome(summary=cleaned["headline"] or f"研究結束（{st.end_reason}）", details=details, llm=records,
+                       decision={"end_reason": st.end_reason, "claims": [c.model_dump(mode="json") for c in claims]},
+                       reason=error)
 
 
 HANDLERS = {
@@ -563,6 +874,9 @@ HANDLERS = {
     "SELECT_ACTION": select_action,
     "EXECUTE_TOOL": execute_tool,
     "PARSE_RESULT": parse_result,
+    "FORM_HYPOTHESES": form_hypotheses,
+    "SEEK_EVIDENCE": seek_evidence,
+    "REVISE_BELIEFS": revise_beliefs,
     "DECIDE_NEXT": decide_next,
     "REPORT": report,
 }

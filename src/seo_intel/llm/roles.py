@@ -65,6 +65,130 @@ class PlanOut(BaseModel):
     rationale: str
 
 
+HYPOTHESIZER_SYSTEM = """You are the hypothesis module of an SEO competitive-intelligence research agent.
+Given measured observations, propose explanations that the program can test with objective evidence.
+
+Rules:
+- Every hypothesis must be falsifiable: state a quantified, observable prediction and a concrete falsification condition.
+- Cite the observation IDs (e.g. O-3) that motivated each hypothesis. Never invent observations or numbers.
+- Propose competing explanations, not one favourite: include alternatives that the same observations could support
+  (e.g. a different template on the same site, background churn, or a sitewide cause such as an algorithm update).
+- For competitor hypotheses, subject_site must be one of the task's competitors and template must be copied
+  exactly from known_templates (format: domain/path/{slug}). For sitewide_factor leave subject_site and template empty.
+- prior is your probability before testing, between 0.1 and 0.6.
+- Write every free-text field in Traditional Chinese (Taiwan).
+Categories: competitor_content_change (existing pages rewritten or expanded), competitor_new_pages (new pages or a new
+template), sitewide_factor (algorithm update, technical problem affecting the whole own site), own_site_change, other."""
+
+EVIDENCE_SYSTEM = """You are the evidence-planning module of an SEO competitive-intelligence research agent.
+Free probes have already been run automatically. Decide which costly probes are worth their budget because their
+result could change which hypothesis is believed. Prefer probes that discriminate between competing hypotheses;
+skip probes whose outcome would not change any conclusion. Write free-text fields in Traditional Chinese (Taiwan)."""
+
+VERIFIER_SYSTEM = """You are an independent red-team reviewer for an SEO research agent.
+You see one hypothesis and the evidence table, not the reasoning of whoever proposed it.
+Try to refute the hypothesis first: look for alternative explanations, weak or missing evidence, timing problems,
+small samples and confounders. Every objection must cite observation IDs that actually support it; objections
+without valid citations are discarded. Do not invent data. If the hypothesis survives, say so.
+You may request additional probes from the catalog. Write free-text fields in Traditional Chinese (Taiwan)."""
+
+REPORTER_SYSTEM = """You are the reporting module of an SEO research agent.
+The program has already derived the structured claims from the evidence; do not change their facts.
+Explain them for a marketing decision-maker in Traditional Chinese (Taiwan): what happened, why the evidence
+supports it, what was ruled out, and what remains uncertain. Cite sources inline as [C1], [H2], [EV-3], [O-5];
+only cite IDs that appear in the material. Recommendations must follow from the claims."""
+
+
+class HypothesisOut(BaseModel):
+    category: Literal["competitor_content_change", "competitor_new_pages", "sitewide_factor", "own_site_change", "other"]
+    statement: str
+    subject_site: str
+    template: str
+    mechanism: str
+    prediction: str
+    falsification: str
+    cited_observations: list[str]
+    prior: float
+
+
+class HypothesesOut(BaseModel):
+    hypotheses: list[HypothesisOut]
+    reasoning_summary: str
+
+
+class ProbeRequest(BaseModel):
+    hypothesis_id: str
+    probe: Literal["competitor_rank_gain", "template_change_sample"]
+    rationale: str
+
+
+class ProbePlanOut(BaseModel):
+    discriminating_question: str
+    probes: list[ProbeRequest]
+
+
+class Objection(BaseModel):
+    text: str
+    cited_observations: list[str]
+    severity: Literal["minor", "major"]
+
+
+class VerifierOut(BaseModel):
+    assessment: Literal["holds", "weak", "fails"]
+    objections: list[Objection]
+    requested_probes: list[str]
+    summary: str
+
+
+class FindingOut(BaseModel):
+    claim_id: str
+    explanation: str
+
+
+class ExcludedOut(BaseModel):
+    hypothesis_id: str
+    reason: str
+
+
+class ReportOut(BaseModel):
+    headline: str
+    summary: str
+    findings: list[FindingOut]
+    excluded: list[ExcludedOut]
+    caveats: list[str]
+    recommendations: list[str]
+
+
+def _j(obj) -> str:
+    return json.dumps(obj, ensure_ascii=False, indent=1, default=str)
+
+
+def hypotheses_prompt(task: TaskInput, goal: ResearchGoal, digest: dict, refuted: list[dict],
+                      lessons: list[str] | None = None) -> str:
+    extra = f"\n\n<refuted_or_rejected_hypotheses>\n{_j(refuted)}\n</refuted_or_rejected_hypotheses>" if refuted else ""
+    if lessons:
+        extra += "\n\n<lessons_from_past_episodes>\n" + "\n".join(f"- {x}" for x in lessons) + "\n</lessons_from_past_episodes>"
+    return (f"Propose 2 to 4 competing, falsifiable hypotheses for the goal.\n\n<task>\n{task_json(task)}\n</task>\n\n"
+            f"<goal>\n{goal.model_dump_json(indent=1)}\n</goal>\n\n<digest>\n{_j(digest)}\n</digest>{extra}")
+
+
+def evidence_prompt(hypotheses: list[dict], catalog: dict[str, dict], budget: dict) -> str:
+    return (f"Choose costly probes (possibly none).\n\n<hypotheses>\n{_j(hypotheses)}\n</hypotheses>\n\n"
+            f"<probe_catalog>\n{_j(catalog)}\n</probe_catalog>\n\n<budget>\n{_j(budget)}\n</budget>")
+
+
+def verifier_prompt(hypothesis: dict, observations: list[dict], catalog: dict[str, dict]) -> str:
+    return (f"Review this hypothesis.\n\n<hypothesis>\n{_j(hypothesis)}\n</hypothesis>\n\n"
+            f"<observations>\n{_j(observations)}\n</observations>\n\n<probe_catalog>\n{_j(catalog)}\n</probe_catalog>")
+
+
+def report_prompt(task: TaskInput, goal: ResearchGoal, claims: list[dict], hypotheses: list[dict],
+                  confounder: str | None) -> str:
+    return (f"Write the research report.\n\n<task>\n{task_json(task)}\n</task>\n\n<goal>\n{goal.model_dump_json(indent=1)}\n</goal>\n\n"
+            f"<claims>\n{_j(claims)}\n</claims>\n\n<hypotheses>\n{_j(hypotheses)}\n</hypotheses>\n\n"
+            f"<confounder>\n{confounder or 'none detected'}\n</confounder>")
+
+
 def task_json(task: TaskInput) -> str:
     return json.dumps({
         "question": task.question,

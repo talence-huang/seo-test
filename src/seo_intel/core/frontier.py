@@ -210,8 +210,10 @@ class Frontier:
         return None
 
     def best(self, k: int = 5, *, domains: list[str] | None = None, under_sampled: int | None = None,
-             exclude_traps: bool = False) -> list[tuple[Entry, float, dict[str, float]]]:
-        """回傳前 k 個候選（每個範本最多一個，確保多樣性）與分數明細。"""
+             exclude_traps: bool = False, templates: list[str] | None = None) -> list[tuple[Entry, float, dict[str, float]]]:
+        """回傳前 k 個候選與分數明細。一般情況每個範本最多一個（確保多樣性）；指定 templates 時取該範本的前 k 個。"""
+        if templates is not None:
+            return self._best_within(templates, k)
         total_fetched = sum(s.n_fetched for s in self.templates.values())
         out = []
         for tkey, stat in self.templates.items():
@@ -229,6 +231,21 @@ class Frontier:
             _, parts = self._static(e)
             parts.update(self._dynamic(stat, total_fetched))
             out.append((e, round(sum(parts.values()), 4), {p: round(v, 4) for p, v in parts.items()}))
+        out.sort(key=lambda x: -x[1])
+        return out[:k]
+
+    def _best_within(self, templates: list[str], k: int) -> list[tuple[Entry, float, dict[str, float]]]:
+        total_fetched = sum(s.n_fetched for s in self.templates.values())
+        out = []
+        for tkey in templates:
+            stat = self.templates.get(tkey)
+            if stat is None:
+                continue
+            dynamic = self._dynamic(stat, total_fetched)
+            for e in sorted((x for x in self.entries.values() if x.template == tkey and x.status == "new"),
+                            key=lambda x: -self._static(x)[0])[:k]:
+                parts = {**self._static(e)[1], **dynamic}
+                out.append((e, round(sum(parts.values()), 4), {p: round(v, 4) for p, v in parts.items()}))
         out.sort(key=lambda x: -x[1])
         return out[:k]
 

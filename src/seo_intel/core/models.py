@@ -82,6 +82,7 @@ class Action(BaseModel):
     tool: ToolName
     args: dict[str, Any]
     need_id: str | None = None
+    probe_id: str | None = None     # 為了某個證據探針而執行的行動
     phase: Phase
     score: float
     breakdown: dict[str, float] = {}
@@ -107,6 +108,71 @@ class Observation(BaseModel):
     url: str | None = None
 
 
+HypothesisCategory = Literal["competitor_content_change", "competitor_new_pages", "sitewide_factor",
+                             "own_site_change", "other"]
+Strength = Literal["weak", "moderate", "strong"]
+
+
+class Hypothesis(BaseModel):
+    id: str
+    round: int
+    category: HypothesisCategory
+    statement: str
+    subject_site: str | None = None
+    template: str | None = None          # 範本鍵，例如 shieldguide.sim/guide/{slug}
+    mechanism: str = ""
+    prediction: str
+    falsification: str
+    cited: list[str] = []                # 形成時引用的觀察 ID
+    prior: float
+    posterior: float
+    status: Literal["proposed", "testing", "supported", "refuted", "inconclusive", "rejected"] = "proposed"
+    verified: bool = False               # 是否已經過紅隊驗證
+    note: str | None = None
+
+
+class EvidenceItem(BaseModel):
+    id: str
+    hypothesis_id: str
+    probe: str
+    direction: Literal["for", "against"]
+    strength: Strength
+    observation_ids: list[str]
+    note: str
+    source: Literal["probe", "verifier"] = "probe"
+    seq: int = 0
+
+
+class Probe(BaseModel):
+    id: str
+    kind: str
+    hypothesis_ids: list[str]
+    status: Literal["queued", "executed", "evaluated", "skipped"] = "queued"
+    pending: list[str] = []              # 尚未執行完的行動簽章
+    observation_ids: list[str] = []
+    sample: list[str] = []               # 比例估計用的隨機樣本（不受 frontier 排序的選樣偏誤影響）
+    requested_by: Literal["system", "planner", "verifier"] = "system"
+    rationale: str = ""
+    note: str | None = None
+
+
+class Claim(BaseModel):
+    id: str
+    claim_type: Literal["displacement_cause", "content_strategy"]
+    subject_site: str
+    template: str
+    template_prefix: str
+    cluster: str
+    change_types: list[str]
+    date_window: tuple[str, str] | None
+    direction: Literal["own_loss", "competitor_gain"]
+    confidence: float
+    hypothesis_id: str
+    evidence_ids: list[str]
+    observation_ids: list[str]
+    validated: bool = False
+
+
 class BudgetState(BaseModel):
     fetches: int = 0
     fetches_by_domain: dict[str, int] = {}
@@ -129,7 +195,16 @@ class EpisodeState(BaseModel):
     info_needs: list[InfoNeed] = []
     observations: list[Observation] = []
     pending: Action | None = None
-    decision: Literal["continue", "pivot", "finish"] | None = None
+    decision: Literal["continue", "form", "seek", "revise", "finish"] | None = None
+    hypotheses: list[Hypothesis] = []
+    evidence: list[EvidenceItem] = []
+    probes: list[Probe] = []
+    evidence_queue: list[Action] = []
+    hypothesis_round: int = 0
+    seek_rounds: int = 0                 # 本輪假設已尋找證據的次數
+    belief_history: list[dict[str, Any]] = []
+    claims: list[Claim] = []
+    report: dict[str, Any] | None = None
     end_reason: str | None = None
     done_signatures: list[str] = []
     fetched: dict[str, dict[str, Any]] = {}       # url → 頁面摘要
@@ -145,6 +220,18 @@ class EpisodeState(BaseModel):
 
     def needs_of(self, kind: str) -> list[InfoNeed]:
         return [n for n in self.info_needs if n.kind == kind]
+
+    def hypothesis(self, hid: str) -> Hypothesis | None:
+        return next((h for h in self.hypotheses if h.id == hid), None)
+
+    def probe(self, pid: str) -> Probe | None:
+        return next((p for p in self.probes if p.id == pid), None)
+
+    def observation(self, oid: str) -> Observation | None:
+        return next((o for o in self.observations if o.id == oid), None)
+
+    def evidence_for(self, hid: str) -> list[EvidenceItem]:
+        return [e for e in self.evidence if e.hypothesis_id == hid]
 
     def add_observation(self, kind: str, summary: str, data: dict[str, Any], *,
                         need_id: str | None = None, url: str | None = None) -> Observation:

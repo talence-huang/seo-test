@@ -73,3 +73,29 @@ class DbRecorder:
             conn.execute("UPDATE episodes SET status = ?, budget_json = ?, ended_at = ? WHERE id = ?",
                          (state.status, state.budget.model_dump_json(),
                           utc_now() if state.status in ("done", "failed") else None, state.id))
+        if state.status != "done":
+            return
+        now, eid = utc_now(), state.id
+        with self.db.transaction() as conn:   # 結束時寫入研究結論（續跑時先清除舊紀錄）
+            hyp_ids = [f"{eid}/{h.id}" for h in state.hypotheses]
+            for hid in hyp_ids:
+                conn.execute("DELETE FROM evidence WHERE hypothesis_id = ?", (hid,))
+            conn.execute("DELETE FROM hypotheses WHERE episode_id = ?", (eid,))
+            conn.execute("DELETE FROM claims WHERE episode_id = ?", (eid,))
+        for h in state.hypotheses:
+            self.db.insert("hypotheses", {
+                "id": f"{eid}/{h.id}", "episode_id": eid, "category": h.category, "statement": h.statement,
+                "prediction": h.prediction, "falsification": h.falsification, "prior": h.prior,
+                "posterior": min(0.999, max(0.001, h.posterior)), "status": h.status, "created_at": now, "updated_at": now,
+            })
+        for e in state.evidence:
+            for oid in e.observation_ids:
+                self.db.insert("evidence", {
+                    "hypothesis_id": f"{eid}/{e.hypothesis_id}", "observation_id": f"{eid}/{oid}",
+                    "direction": e.direction, "strength": e.strength, "note": f"{e.id} [{e.probe}] {e.note}", "ts": now,
+                })
+        for c in state.claims:
+            self.db.insert("claims", {
+                "id": f"{eid}/{c.id}", "episode_id": eid, "claim_json": c.model_dump(mode="json"),
+                "confidence": c.confidence, "evidence_ids_json": c.evidence_ids, "validated": c.validated,
+            })

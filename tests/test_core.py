@@ -204,7 +204,7 @@ def test_episode_s1_finds_true_template_without_violations(settings, tmp_path):
     ctx = _ctx(sim, settings, tmp_path)
     ResearchLoop(ctx, [TraceWriter(tmp_path / "trace.jsonl")]).run()
     st = ctx.state
-    assert (st.status, st.end_reason) == ("done", "all_needs_answered")
+    assert (st.status, st.end_reason) == ("done", "hypothesis_supported")
     page_need = st.needs_of("page_changes")[0]
     assert page_need.resolution.startswith("shieldguide.sim/guide/{slug}")
     assert not any(sim.server.log.violations().values())
@@ -228,11 +228,11 @@ def test_rich_keyword_lists_do_not_dilute_topic_matching(settings, tmp_path):
 
     sim = build("s1")
     state = new_state(_task(sim), sim.clock)
-    ctx = build_context(state, settings, FakeLLM(settings.models, {"planner": richer}), sim.client(), sim.clock,
-                        tmp_path)
+    ctx = build_context(state, settings, FakeLLM(settings.models, {r: richer for r in settings.models.roles}),
+                        sim.client(), sim.clock, tmp_path)
     ResearchLoop(ctx, []).run()
     assert len(ctx.state.goal.topic_keywords) == 5
-    assert ctx.state.end_reason == "all_needs_answered"
+    assert ctx.state.end_reason == "hypothesis_supported"
     assert ctx.state.needs_of("page_changes")[0].resolution.startswith("shieldguide.sim/guide/{slug}")
 
 
@@ -250,7 +250,8 @@ def test_every_scenario_respects_budget_and_policy(settings, tmp_path, sid):
     ResearchLoop(ctx, []).run()
     st = ctx.state
     assert st.status == "done"
-    assert st.budget.fetches <= ctx.ledger.fetch_cap(Phase.TARGETED)   # 驗證額度未被動用
+    assert st.budget.fetches <= settings.budget.max_fetches
+    assert st.budget.api_calls <= settings.budget.max_api_calls
     assert all(v <= settings.budget.max_fetches_per_domain for v in st.budget.fetches_by_domain.values())
     assert not any(sim.server.log.violations().values())
 
@@ -282,8 +283,10 @@ def test_observability_artifacts(settings, tmp_path):
     ResearchLoop(ctx, [TraceWriter(tmp_path / "trace.jsonl"), DbRecorder(db, ctx.state)]).run()
     st = ctx.state
     assert db.query("SELECT COUNT(*) FROM steps WHERE episode_id = ?", (st.id,))[0][0] == st.seq
-    assert db.query("SELECT COUNT(*) FROM llm_calls WHERE episode_id = ?", (st.id,))[0][0] == 2
+    assert db.query("SELECT COUNT(*) FROM llm_calls WHERE episode_id = ?", (st.id,))[0][0] == st.budget.llm_calls
     assert db.query("SELECT status FROM episodes WHERE id = ?", (st.id,))[0][0] == "done"
+    assert db.query("SELECT COUNT(*) FROM hypotheses WHERE episode_id = ?", (st.id,))[0][0] == len(st.hypotheses)
+    assert db.query("SELECT COUNT(*) FROM claims WHERE episode_id = ?", (st.id,))[0][0] == len(st.claims) >= 1
     html = render_timeline(read_trace(tmp_path / "trace.jsonl"), st.model_dump(mode="json"), ctx.frontier.to_dict(),
                            {"violations": sim.server.log.violations()})
     assert "資訊需求" in html and "候選行動" in html and st.id in html
